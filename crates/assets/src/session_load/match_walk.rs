@@ -147,19 +147,16 @@ pub(super) async fn walk_prepared_match(
             )
         }
         Err(gap) => {
-            drop(material_seed);
-            (
-                LoadedWorld::with_gap(
-                    WorldDrawPolicy::default(),
-                    PreparedCapability::PreparedWorld,
-                    gap,
-                    Some("assets::session_load::load_prepared_match/zone_open"),
-                ),
-                None,
-            )
+            return (MatchLoadOutcome::Refused(gap), Some(common));
         }
     };
 
+    let Some(map_family) = map_namespace else {
+        return (
+            MatchLoadOutcome::Refused("map family missing".into()),
+            Some(common),
+        );
+    };
     let LoadedWorld {
         scripts: map_scripts,
         mut world,
@@ -719,7 +716,7 @@ pub(super) async fn walk_prepared_match(
         );
     }
     let mut fx = std::mem::take(&mut world.fx).publish();
-    fx.set_map_namespace(map_namespace.unwrap_or(asset_core::AssetNamespace::Iw4));
+    fx.set_map_namespace(map_family);
     let xanims = xanims.publish();
     let destructible_death =
         crate::stamp_match_destructible_death(&xanims, &world.map_xmodel_scene_assets);
@@ -782,7 +779,7 @@ fn resolve_world_lights(
     });
     let (ordinal, source) = asset_world::resolve_outdoor_image(
         draw.outdoor_image_name.as_deref(),
-        map_namespace.unwrap_or(asset_core::AssetNamespace::Iw4),
+        map_namespace?,
         global,
     );
     draw.outdoor_image = ordinal;

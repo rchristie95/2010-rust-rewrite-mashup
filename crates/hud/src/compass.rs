@@ -283,7 +283,7 @@ pub(crate) fn update_compass(
         items.map,
         items.player.zip(player_stem),
         &drawable.image_name,
-        hud_images.map_namespace(),
+        hud_images.map_namespace().expect("drawable compass family"),
         uv,
         map_rotation,
         [player_w, player_h],
@@ -291,7 +291,9 @@ pub(crate) fn update_compass(
         jam_fade,
     );
 
-    let map_ns = hud_images.map_namespace();
+    let Some(map_ns) = hud_images.map_namespace() else {
+        return;
+    };
     if hud_images
         .get(map_ns, &drawable.image_name, &mut images)
         .is_none()
@@ -783,7 +785,7 @@ pub(crate) fn resolve(
         gaps.raise(GapCause::CompassNoImageDeclared);
         return None;
     };
-    let map_ns = hud_images.map_namespace();
+    let map_ns = hud_images.map_namespace()?;
     hud_images.ensure_rgba(map_ns, image_name);
     if hud_images.rgba(map_ns, image_name).is_none() {
         gaps.raise(GapCause::CompassImageMissing {
