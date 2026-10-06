@@ -6,14 +6,17 @@ pub enum AssetNamespace {
     Iw4,
     T5,
     Iw5,
+    T6,
 }
 
 impl AssetNamespace {
+    pub const ALL: [Self; 4] = [Self::Iw4, Self::T5, Self::Iw5, Self::T6];
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Iw4 => "iw4",
             Self::T5 => "t5",
             Self::Iw5 => "iw5",
+            Self::T6 => "t6",
         }
     }
 
@@ -22,6 +25,14 @@ impl AssetNamespace {
             ZoneGame::Iw4 => Self::Iw4,
             ZoneGame::T5 => Self::T5,
             ZoneGame::Iw5 => Self::Iw5,
+            ZoneGame::T6 => Self::T6,
+        }
+    }
+
+    pub const fn content(self) -> Self {
+        match self {
+            Self::T6 => Self::Iw4,
+            other => other,
         }
     }
 
@@ -30,6 +41,7 @@ impl AssetNamespace {
             "iw4" => Some(Self::Iw4),
             "t5" => Some(Self::T5),
             "iw5" => Some(Self::Iw5),
+            "t6" => Some(Self::T6),
             _ => None,
         }
     }

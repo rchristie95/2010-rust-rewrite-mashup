@@ -3,6 +3,7 @@ mod iw4;
 mod iw5;
 mod sink;
 mod t5;
+mod t6;
 
 use std::path::Path;
 
@@ -20,6 +21,11 @@ use asset_core::ZoneGame;
 use asset_game::WeaponBuild;
 use asset_model::{BodyMeshBuild, FpvMeshBuild, WorldWeaponBuild};
 use asset_transport::{LoadProgress, ZoneImage};
+
+pub type FilmVisionCatalog = std::collections::BTreeMap<
+    String,
+    Result<asset_world::FilmVision, asset_world::FilmVisionParseError>,
+>;
 
 #[derive(Clone, Debug)]
 pub struct LaneGap {
@@ -122,12 +128,44 @@ pub struct CommonCensus {
     pub s1_common_bytes: usize,
 
     pub teamsets: std::collections::HashMap<String, asset_game::MapTeamSettings>,
-    pub film_visions: std::collections::BTreeMap<
-        String,
-        Result<asset_world::FilmVision, asset_world::FilmVisionParseError>,
-    >,
+    pub film_visions: FilmVisionCatalog,
 
     pub pending_images: Option<asset_material::material_images::ImageDemandPlan>,
+
+    pub(crate) preparation: Option<Box<dyn CommonFamilyCompiler>>,
+}
+
+pub(crate) struct CommonPreparationProducts {
+    pub weapons: WeaponBuild,
+    pub materials: asset_material::MaterialCatalog,
+    pub fpv: FpvMeshBuild,
+    pub world: WorldWeaponBuild,
+    pub projectiles: asset_model::ProjectileMeshBuild,
+    pub xanims: XAnimBuild,
+    pub fx: asset_game::FxCatalog,
+    pub report: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CommonDependencyRefusal {
+    ModelDonor {
+        model: String,
+        stand_in: &'static str,
+        fields: &'static [asset_material::t6_techset::T6MaterialFields],
+    },
+    WeaponPreparation(asset_game::WeaponPreparationRefusal),
+    EffectDonor {
+        effect: &'static str,
+    },
+}
+
+pub(crate) struct CommonPreparationResult {
+    pub products: CommonPreparationProducts,
+    pub refusals: Vec<CommonDependencyRefusal>,
+}
+
+pub(crate) trait CommonFamilyCompiler: Send {
+    fn compile(self: Box<Self>, products: CommonPreparationProducts) -> CommonPreparationResult;
 }
 
 pub struct MaterialPopulation {
@@ -165,10 +203,7 @@ pub trait ZoneLane: Send + Sync {
         shared_surfaces: asset_model::SharedXModelSurfaces,
 
         material_seed: asset_material::MaterialCatalog,
-        common_film_visions: &mut std::collections::BTreeMap<
-            String,
-            Result<asset_world::FilmVision, asset_world::FilmVisionParseError>,
-        >,
+        common_film_visions: &FilmVisionCatalog,
     ) -> LoadedWorld;
 
     fn load_common_mp(
@@ -194,6 +229,7 @@ pub fn lane(game: ZoneGame) -> &'static dyn ZoneLane {
         ZoneGame::Iw4 => &iw4::Iw4Lane,
         ZoneGame::T5 => &t5::T5Lane,
         ZoneGame::Iw5 => &iw5::Iw5Lane,
+        ZoneGame::T6 => &t6::T6Lane,
     }
 }
 
@@ -210,5 +246,6 @@ pub const LANE_GAPS: &[&str] = &[
     "assets::lane::iw5::load_world/zone_arenas",
     "assets::lane::iw5::load_world/no_gfx_world",
     "assets::lane::iw5::load_world/world_mesh",
+    "assets::lane::t6::load_world/no_decoder",
     "assets::session_load::load_prepared_match/zone_open",
 ];

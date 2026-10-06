@@ -50,6 +50,12 @@ pub fn publish_process_cpus(cpus: Vec<usize>) {
     let _ = PROCESS_CPUS.set(cpus);
 }
 
+pub fn use_process_cpus() {
+    if let Some(cpus) = PROCESS_CPUS.get() {
+        set_thread_cpus(cpus);
+    }
+}
+
 pub fn load_workers() -> usize {
     PROCESS_CPUS
         .get()
@@ -92,6 +98,7 @@ fn set_thread_cpus(_cpus: &[usize]) {}
 
 #[derive(Default, Clone)]
 pub struct PreparedWorld {
+    pub source_namespace: Option<asset_core::AssetNamespace>,
     pub draw: Option<WorldDraw>,
     pub dynamic_light: Option<asset_world::ResolvedLightDef>,
     pub static_model_meshes: Vec<asset_world::ModelMesh>,
@@ -125,6 +132,7 @@ pub struct PreparedWorld {
     pub intermission_view: Option<IntermissionView>,
 
     pub exp_fog: Option<asset_world::ExpFog>,
+    pub t6_film_grade: Option<asset_world::T6FilmGrade>,
 
     pub film_vision: Option<asset_world::FilmVision>,
     pub film_visions: std::collections::BTreeMap<

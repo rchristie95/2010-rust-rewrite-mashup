@@ -16,12 +16,8 @@ use bevy::render::render_resource::{
 };
 use bevy::tasks::TaskPool;
 
-use crate::material_catalog::TS_2D;
 use crate::progress::StageHandle;
-use crate::{
-    AuthoredImage, ImageVariantId, MaterialDefinitions, TS_COLOR_MAP, TS_FUNCTION, TS_NORMAL_MAP,
-    TS_WATER_MAP,
-};
+use crate::{AuthoredImage, ImageVariantId, MaterialDefinitions, TS_NORMAL_MAP, TS_WATER_MAP};
 
 /// The texels one archive entry decodes to.
 ///
@@ -42,6 +38,7 @@ enum MipStorage {
     Bc1,
     Bc2,
     Bc3,
+    Bc5,
 }
 
 impl DecodedMips {
@@ -94,6 +91,7 @@ impl DecodedMips {
             MipStorage::Bc1 => 1,
             MipStorage::Bc2 => 2,
             MipStorage::Bc3 => 3,
+            MipStorage::Bc5 => 5,
         });
         out.extend_from_slice(&[0, 0, 0]);
         out.extend_from_slice(&(self.level_sizes.len() as u32).to_le_bytes());
@@ -121,6 +119,7 @@ impl DecodedMips {
             1 => MipStorage::Bc1,
             2 => MipStorage::Bc2,
             3 => MipStorage::Bc3,
+            5 => MipStorage::Bc5,
             _ => return None,
         };
         let level_count = u32::from_le_bytes(bytes[24..28].try_into().ok()?) as usize;
@@ -156,6 +155,12 @@ impl DecodedMips {
             MipStorage::Bc1 => decode_blocks(&level0, self.width, self.height, PixelFormat::Bc1)?,
             MipStorage::Bc2 => decode_blocks(&level0, self.width, self.height, PixelFormat::Bc2)?,
             MipStorage::Bc3 => decode_blocks(&level0, self.width, self.height, PixelFormat::Bc3)?,
+            MipStorage::Bc5 => decode_blocks(
+                &bc5_to_dxt5nm(&level0),
+                self.width,
+                self.height,
+                PixelFormat::Bc3,
+            )?,
         };
         Ok((self.width, self.height, pixels))
     }
@@ -170,6 +175,7 @@ impl DecodedMips {
             (MipStorage::Bc2, false) => TextureFormat::Bc2RgbaUnormSrgb,
             (MipStorage::Bc3, true) => TextureFormat::Bc3RgbaUnorm,
             (MipStorage::Bc3, false) => TextureFormat::Bc3RgbaUnormSrgb,
+            (MipStorage::Bc5, _) => TextureFormat::Bc5RgUnorm,
         }
     }
 }
@@ -273,7 +279,7 @@ fn color_map_force_linear(
 
 fn texture_semantic_decodes_as_normal(semantic: u8) -> Option<bool> {
     match semantic {
-        TS_FUNCTION | TS_WATER_MAP => None,
+        TS_WATER_MAP => None,
         TS_NORMAL_MAP => Some(true),
         _ => Some(false),
     }
@@ -375,14 +381,14 @@ fn requested_color_map_slots(catalog: &MaterialDefinitions) -> Vec<ImageRequest>
         .collect()
 }
 
-pub fn decode_color_or_2d_for_keys(
+pub fn decode_images_for_keys(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
     keys: impl IntoIterator<Item = crate::MaterialKey>,
     stage: &StageHandle,
     pool: &TaskPool,
 ) -> Result<usize, String> {
-    let work = requested_keyed_2d_slots(catalog, keys);
+    let work = requested_keyed_image_slots(catalog, keys);
     if work.is_empty() {
         return Ok(0);
     }
@@ -411,7 +417,7 @@ pub fn decode_color_or_2d_for_keys(
     Ok(n)
 }
 
-fn requested_keyed_2d_slots(
+fn requested_keyed_image_slots(
     catalog: &MaterialDefinitions,
     keys: impl IntoIterator<Item = crate::MaterialKey>,
 ) -> Vec<ImageRequest> {
@@ -435,33 +441,40 @@ fn requested_keyed_2d_slots(
         if bind.is_empty() || !wanted.contains(&(material.namespace, bind.to_owned())) {
             continue;
         }
-        let tex = material
-            .textures
-            .iter()
-            .find(|t| t.semantic == TS_COLOR_MAP && t.image.is_some())
-            .or_else(|| {
-                material
-                    .textures
-                    .iter()
-                    .find(|t| t.semantic == TS_2D && t.image.is_some())
-            });
-        let Some(texture) = tex else {
-            continue;
-        };
-        let Some(image) = texture.image else {
-            continue;
-        };
-        if catalog
-            .images
-            .get(image)
-            .is_some_and(|img| img.decoded.is_some() || img.pending_decode.is_some())
-        {
-            continue;
+        let alpha_test = catalog
+            .agreed_alpha_test_cutoff(material)
+            .is_some_and(|cutoff| cutoff.is_some());
+        let force_linear = color_map_force_linear(
+            catalog.is_unlit(material),
+            catalog.color_map_transform(material),
+            catalog.takes_model_lighting(material),
+        );
+        for texture in &material.textures {
+            let Some(is_normal) = texture_semantic_decodes_as_normal(texture.semantic) else {
+                continue;
+            };
+            let Some(image) = texture.image else {
+                continue;
+            };
+            if catalog
+                .images
+                .get(image)
+                .is_some_and(|img| img.decoded.is_some() || img.pending_decode.is_some())
+            {
+                continue;
+            }
+            let sharp = alpha_test && !is_normal;
+            let linear = force_linear && !is_normal;
+            if let Some((_, (_, normal, already_sharp, already_linear))) =
+                work.iter_mut().find(|(already, _)| *already == image)
+            {
+                *normal |= is_normal;
+                *already_sharp |= sharp;
+                *already_linear |= linear;
+            } else {
+                work.push((image, (texture.sampler_state, is_normal, sharp, linear)));
+            }
         }
-        if work.iter().any(|(already, _)| *already == image) {
-            continue;
-        }
-        work.push((image, (texture.sampler_state, false, false, false)));
     }
     work
 }
@@ -1049,6 +1062,7 @@ pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, 
     let pixel_format = match source.format {
         21 => PixelFormat::Bgra8,
         value if value == u32::from_le_bytes(*b"DXT1") => PixelFormat::Bc1,
+        value if value == u32::from_le_bytes(*b"DXT5") => PixelFormat::Bc3,
         _ => {
             return Err(format!(
                 "{} has unsupported probe format {}",
@@ -1092,10 +1106,10 @@ pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, 
                         data.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
                     }
                 }
-                PixelFormat::Bc1 => {
+                PixelFormat::Bc1 | PixelFormat::Bc3 => {
                     data.extend_from_slice(&decode_blocks(encoded, side, side, pixel_format)?);
                 }
-                _ => unreachable!("probe decoder admits only BGRA8 and BC1"),
+                _ => unreachable!(),
             }
         }
         level_offset += level_bytes;
@@ -1213,6 +1227,56 @@ pub fn decode_zone_image_rgba(
     decode_gfx_image(payload, width, height, format)?.into_top_level_rgba8()
 }
 
+pub type ZoneUiRgba = (u32, u32, Arc<Vec<u8>>);
+
+static ZONE_UI_IMAGES: RwLock<Vec<(ZoneUiKey, Arc<[u8]>)>> = RwLock::new(Vec::new());
+
+type ZoneUiKey = (asset_core::AssetNamespace, String);
+
+pub fn store_zone_ui_images(
+    namespace: asset_core::AssetNamespace,
+    images: impl IntoIterator<Item = (String, Arc<[u8]>)>,
+) {
+    let mut store = ZONE_UI_IMAGES
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner());
+    store.retain(|((ns, _), _)| *ns != namespace);
+    store.extend(
+        images
+            .into_iter()
+            .map(|(name, image)| ((namespace, name.to_ascii_lowercase()), image)),
+    );
+}
+
+fn zone_ui_iwi(namespace: asset_core::AssetNamespace, material: &str) -> Option<Arc<[u8]>> {
+    let name = crate::AssetRef::bare_name(material).to_ascii_lowercase();
+    ZONE_UI_IMAGES
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .iter()
+        .find(|((ns, stored), _)| *ns == namespace && *stored == name)
+        .map(|(_, iwi)| Arc::clone(iwi))
+}
+
+pub fn has_zone_ui_image(namespace: asset_core::AssetNamespace, material: &str) -> bool {
+    zone_ui_iwi(namespace, material).is_some()
+}
+
+pub fn zone_ui_image(namespace: asset_core::AssetNamespace, material: &str) -> Option<ZoneUiRgba> {
+    let iwi = zone_ui_iwi(namespace, material)?;
+    match decode_iwi_rgba(&iwi) {
+        Ok((width, height, rgba)) => Some((width, height, Arc::new(rgba))),
+        Err(error) => {
+            diag::warn!(Zone, "zone UI image {material}: {error}");
+            None
+        }
+    }
+}
+
+pub fn decode_iwi_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    expand_top_level(decode_iwi_mips(bytes))
+}
+
 pub fn decode_ui_image(
     games_root: &Path,
     image_name: &str,
@@ -1221,6 +1285,9 @@ pub fn decode_ui_image(
         let key = asset_core::AssetKey::parse(image_name).map_err(|e| e.to_string())?;
         if key.kind != asset_core::AssetKind::Material {
             return Err("UI image key must name a material".into());
+        }
+        if let Some((width, height, rgba)) = zone_ui_image(key.namespace, &key.name) {
+            return Ok(Some((width, height, rgba.as_ref().clone())));
         }
         let trees = asset_transport::NamespaceTrees::discover(&asset_transport::GamesRoot(
             games_root.to_owned(),
@@ -1271,25 +1338,35 @@ pub fn decode_ui_image_from_main(
 }
 
 fn ui_decode_mains(games_root: &Path) -> Vec<PathBuf> {
-    let mut mains = game_mains_under(games_root);
-    mains.sort_by(
-        |a, b| match (IwdIndex::is_cached(a), IwdIndex::is_cached(b)) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.cmp(b),
-        },
-    );
+    let mut mains: Vec<PathBuf> = Vec::new();
+    for mut group in asset_transport::game_mains_by_root(games_root) {
+        group.sort_by_key(|main| !IwdIndex::is_cached(main));
+        for main in group {
+            if !mains.contains(&main) {
+                mains.push(main);
+            }
+        }
+    }
     mains
-}
-
-fn game_mains_under(games_root: &Path) -> Vec<PathBuf> {
-    asset_transport::game_mains_under(games_root)
 }
 
 pub fn decode_map_preview(
     zone_ff: &Path,
     map_name: &str,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+    if asset_transport::zone_game_for_path(zone_ff) == Some(asset_core::ZoneGame::T6) {
+        return Ok(zone_ui_image(
+            asset_core::AssetNamespace::T6,
+            &format!("loadscreen_{map_name}"),
+        )
+        .or_else(|| {
+            zone_ui_image(
+                asset_core::AssetNamespace::T6,
+                &format!("menu_{map_name}_map_select_final"),
+            )
+        })
+        .map(|(width, height, rgba)| (width, height, rgba.as_ref().clone())));
+    }
     let main = game_main_for_zone(zone_ff)?;
     let index = IwdIndex::open(&main)?;
     for stem in [
@@ -1496,6 +1573,10 @@ pub fn iwd_entry_reads() -> (u64, u64) {
 }
 
 fn decode_iwi_mips(bytes: &[u8]) -> Result<DecodedMips, String> {
+    decode_iwi_mips_with(bytes, false)
+}
+
+fn decode_iwi_mips_with(bytes: &[u8], keep_bc5: bool) -> Result<DecodedMips, String> {
     if bytes.len() >= IWI_V8_HEADER_LEN
         && bytes[..3] == *b"IWi"
         && bytes[3] == 8
@@ -1514,10 +1595,19 @@ fn decode_iwi_mips(bytes: &[u8]) -> Result<DecodedMips, String> {
     let payload = bytes
         .get(start..end)
         .ok_or_else(|| "truncated IWI top mip".to_owned())?;
-    let storage = mip_storage(header.format);
+    let storage = match header.format {
+        PixelFormat::Bc5 if keep_bc5 => MipStorage::Bc5,
+        format => mip_storage(format),
+    };
 
     let single = || -> Result<DecodedMips, String> {
-        let (w, h, pixels) = load_mip_level(payload, header.width, header.height, header.format)?;
+        let (w, h, pixels) = load_mip_level_with(
+            payload,
+            header.width,
+            header.height,
+            header.format,
+            keep_bc5,
+        )?;
         Ok(match storage {
             MipStorage::Rgba8 => DecodedMips::single(w, h, pixels),
             other => DecodedMips::single_compressed(w, h, other, pixels),
@@ -1552,7 +1642,13 @@ fn decode_iwi_mips(bytes: &[u8]) -> Result<DecodedMips, String> {
 
     let mut levels = Vec::with_capacity(ranges.len());
     for (level_start, level_end, w, h) in ranges {
-        match load_mip_level(&bytes[level_start..level_end], w, h, header.format) {
+        match load_mip_level_with(
+            &bytes[level_start..level_end],
+            w,
+            h,
+            header.format,
+            keep_bc5,
+        ) {
             Ok((_, _, pixels)) => levels.push(pixels),
             Err(_) => return single(),
         }
@@ -1634,7 +1730,7 @@ fn mip_storage(format: PixelFormat) -> MipStorage {
     match format {
         PixelFormat::Bc1 => MipStorage::Bc1,
         PixelFormat::Bc2 => MipStorage::Bc2,
-        PixelFormat::Bc3 => MipStorage::Bc3,
+        PixelFormat::Bc3 | PixelFormat::Bc5 => MipStorage::Bc3,
         _ => MipStorage::Rgba8,
     }
 }
@@ -1645,13 +1741,37 @@ fn load_mip_level(
     height: u32,
     format: PixelFormat,
 ) -> Result<(u32, u32, Vec<u8>), String> {
+    load_mip_level_with(data, width, height, format, false)
+}
+
+fn load_mip_level_with(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    keep_bc5: bool,
+) -> Result<(u32, u32, Vec<u8>), String> {
     match format {
+        PixelFormat::Bc5 if keep_bc5 => {
+            let needed = compressed_mip_bytes(width, height, format);
+            let source = data
+                .get(..needed)
+                .ok_or_else(|| "truncated BC5 image".to_owned())?;
+            Ok((width, height, source.to_vec()))
+        }
         PixelFormat::Bc1 | PixelFormat::Bc2 | PixelFormat::Bc3 => {
             let needed = compressed_mip_bytes(width, height, format);
             let source = data
                 .get(..needed)
                 .ok_or_else(|| "truncated BC image".to_owned())?;
             Ok((width, height, source.to_vec()))
+        }
+        PixelFormat::Bc5 => {
+            let needed = compressed_mip_bytes(width, height, format);
+            let source = data
+                .get(..needed)
+                .ok_or_else(|| "truncated BC5 image".to_owned())?;
+            Ok((width, height, bc5_to_dxt5nm(source)))
         }
         _ => decode_pixels(data, width, height, format),
     }
@@ -1709,8 +1829,325 @@ fn parse_iwi_header(bytes: &[u8]) -> Result<IwiHeaderInfo, String> {
                 mip0_start,
             })
         }
+        27 => {
+            if bytes.len() < 64 {
+                return Err("truncated IWI v27 header".into());
+            }
+            let width = u32::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+            let height = u32::from(u16::from_le_bytes([bytes[8], bytes[9]]));
+            let mip0_end = u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
+            let mip0_start = u32::from_le_bytes(bytes[36..40].try_into().unwrap()) as usize;
+            Ok(IwiHeaderInfo {
+                width,
+                height,
+                format: iwi_pixel_format(bytes[4])?,
+                header_len: 64,
+                mip0_end,
+                mip0_start,
+            })
+        }
         version => Err(format!("unsupported IWI version {version}")),
     }
+}
+
+pub fn decode_iwi_texture(
+    bytes: &[u8],
+    sampler_state: u8,
+    is_normal: bool,
+    use_srgb_reads: bool,
+) -> Result<Image, String> {
+    let mips = decode_iwi_mips(bytes)?;
+    let wrap = WrapRecipe {
+        sampler_state,
+        is_normal,
+        alpha_test_color: false,
+        force_linear: false,
+        use_srgb_reads,
+    };
+    let data = mips.packed.clone();
+    Ok(wrap_mips(&mips, data, wrap))
+}
+
+pub fn decode_iwi_texture_t6_folded(
+    color: &[u8],
+    specular: &[u8],
+    sampler_state: u8,
+) -> Result<Image, String> {
+    let mut mips = decode_iwi_mips(color)?;
+    let wrap = WrapRecipe {
+        sampler_state,
+        is_normal: false,
+        alpha_test_color: false,
+        force_linear: false,
+        use_srgb_reads: true,
+    };
+    let (block_bytes, color_offset, format) = match mips.storage {
+        MipStorage::Bc1 => (8, 0, PixelFormat::Bc1),
+        MipStorage::Bc3 => (16, 8, PixelFormat::Bc3),
+        _ => {
+            let data = mips.packed.clone();
+            return Ok(wrap_mips(&mips, data, wrap));
+        }
+    };
+    let pyramid = specular_pyramid(specular)?;
+    let mut offset = 0usize;
+    for level in 0..mips.level_sizes.len() {
+        let size = mips.level_sizes[level] as usize;
+        let (w, h) = (
+            (mips.width >> level).max(1) as usize,
+            (mips.height >> level).max(1) as usize,
+        );
+        let (sw, sh, spec) = pyramid
+            .iter()
+            .rev()
+            .find(|(sw, _, _)| *sw >= w)
+            .unwrap_or(&pyramid[0]);
+        let blocks_wide = w.div_ceil(4);
+        let data = &mut mips.packed[offset..offset + size];
+        let fold_rows = |first_row: usize, rows: &mut [u8]| {
+            for (index, block) in rows.chunks_exact_mut(block_bytes).enumerate() {
+                let mut tile = [0u8; 64];
+                if format == PixelFormat::Bc1 {
+                    if u16::from_le_bytes([block[0], block[1]])
+                        <= u16::from_le_bytes([block[2], block[3]])
+                    {
+                        continue;
+                    }
+                    bcdec_rs::bc1(block, &mut tile, 16);
+                } else {
+                    bcdec_rs::bc3(block, &mut tile, 16);
+                }
+                let (bx, by) = (
+                    index % blocks_wide * 4,
+                    (first_row + index / blocks_wide) * 4,
+                );
+                let texels: [[f32; 3]; 16] = core::array::from_fn(|i| {
+                    let (x, y) = ((bx + i % 4).min(w - 1), (by + i / 4).min(h - 1));
+                    let add = spec[(y * sh / h) * sw + x * sw / w];
+                    core::array::from_fn(|c| {
+                        linear_to_srgb_byte(srgb_byte_to_linear(tile[i * 4 + c]) + add[c])
+                    })
+                });
+                block[color_offset..color_offset + 8].copy_from_slice(&encode_bc1_colour(&texels));
+            }
+        };
+        let row_bytes = blocks_wide * block_bytes;
+        let rows = data.len() / row_bytes;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(rows / 16)
+            .max(1);
+        if threads == 1 {
+            fold_rows(0, data);
+        } else {
+            let rows_per = rows.div_ceil(threads);
+            std::thread::scope(|scope| {
+                for (part, chunk) in data.chunks_mut(rows_per * row_bytes).enumerate() {
+                    let fold_rows = &fold_rows;
+                    scope.spawn(move || fold_rows(part * rows_per, chunk));
+                }
+            });
+        }
+        offset += size;
+    }
+    let data = mips.packed.clone();
+    Ok(wrap_mips(&mips, data, wrap))
+}
+
+type PyramidLevel = (usize, usize, Vec<[f32; 3]>);
+
+fn specular_pyramid(specular: &[u8]) -> Result<Vec<PyramidLevel>, String> {
+    let (w, h, rgba) = decode_iwi_rgba(specular)?;
+    let (mut w, mut h) = (w as usize, h as usize);
+    let top: Vec<[f32; 3]> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| {
+            let rough = 1.0 - f32::from(p[3]) / 255.0;
+            core::array::from_fn(|c| srgb_byte_to_linear(p[c]) * rough)
+        })
+        .collect();
+    let mut levels = vec![(w, h, top)];
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let prev = &levels.last().unwrap().2;
+        let next = (0..nw * nh)
+            .map(|i| {
+                let (x, y) = (i % nw, i / nw);
+                let at = |dx: usize, dy: usize| {
+                    prev[(2 * y + dy).min(h - 1) * w + (2 * x + dx).min(w - 1)]
+                };
+                core::array::from_fn(|c| {
+                    (at(0, 0)[c] + at(1, 0)[c] + at(0, 1)[c] + at(1, 1)[c]) / 4.0
+                })
+            })
+            .collect();
+        levels.push((nw, nh, next));
+        (w, h) = (nw, nh);
+    }
+    Ok(levels)
+}
+
+fn srgb_byte_to_linear(v: u8) -> f32 {
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        core::array::from_fn(|v| {
+            let c = v as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    })[usize::from(v)]
+}
+
+fn linear_to_srgb_byte(c: f32) -> f32 {
+    const STEPS: usize = 4096;
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0..=STEPS)
+            .map(|i| {
+                let c = i as f32 / STEPS as f32;
+                let s = if c <= 0.003_130_8 {
+                    c * 12.92
+                } else {
+                    1.055 * c.powf(1.0 / 2.4) - 0.055
+                };
+                s * 255.0
+            })
+            .collect()
+    });
+    table[(c.clamp(0.0, 1.0) * STEPS as f32 + 0.5) as usize]
+}
+
+fn encode_bc1_colour(texels: &[[f32; 3]; 16]) -> [u8; 8] {
+    let mean: [f32; 3] = core::array::from_fn(|c| texels.iter().map(|t| t[c]).sum::<f32>() / 16.0);
+    let mut cov = [[0f32; 3]; 3];
+    for t in texels {
+        let d: [f32; 3] = core::array::from_fn(|c| t[c] - mean[c]);
+        for a in 0..3 {
+            for b in 0..3 {
+                cov[a][b] += d[a] * d[b];
+            }
+        }
+    }
+    let mut axis = [1f32, 1.0, 1.0];
+    for _ in 0..8 {
+        let next: [f32; 3] = core::array::from_fn(|a| (0..3).map(|b| cov[a][b] * axis[b]).sum());
+        let len = next.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if len < 1e-6 {
+            break;
+        }
+        axis = next.map(|v| v / len);
+    }
+    let project = |t: &[f32; 3]| (0..3).map(|c| (t[c] - mean[c]) * axis[c]).sum::<f32>();
+    let (lo, hi) = texels
+        .iter()
+        .map(project)
+        .fold((f32::MAX, f32::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
+    let pack = |t: f32| {
+        let c: [f32; 3] = core::array::from_fn(|i| (mean[i] + axis[i] * t).clamp(0.0, 255.0));
+        let r = (c[0] * 31.0 / 255.0).round() as u16;
+        let g = (c[1] * 63.0 / 255.0).round() as u16;
+        let b = (c[2] * 31.0 / 255.0).round() as u16;
+        (r << 11) | (g << 5) | b
+    };
+    let (mut c0, mut c1) = (pack(hi), pack(lo));
+    if c0 < c1 {
+        core::mem::swap(&mut c0, &mut c1);
+    }
+    let expand = |c: u16| {
+        let (r, g, b) = ((c >> 11) & 31, (c >> 5) & 63, c & 31);
+        [
+            f32::from((r << 3) | (r >> 2)),
+            f32::from((g << 2) | (g >> 4)),
+            f32::from((b << 3) | (b >> 2)),
+        ]
+    };
+    let (p0, p1) = (expand(c0), expand(c1));
+    let palette: [[f32; 3]; 4] = [
+        p0,
+        p1,
+        core::array::from_fn(|c| (2.0 * p0[c] + p1[c]) / 3.0),
+        core::array::from_fn(|c| (p0[c] + 2.0 * p1[c]) / 3.0),
+    ];
+    let mut indices = 0u32;
+    if c0 != c1 {
+        for (i, t) in texels.iter().enumerate() {
+            let distance = |p: &[f32; 3]| (0..3).map(|c| (p[c] - t[c]).powi(2)).sum::<f32>();
+            let best = (0..4)
+                .min_by(|&a, &b| distance(&palette[a]).total_cmp(&distance(&palette[b])))
+                .unwrap_or(0) as u32;
+            indices |= best << (2 * i);
+        }
+    }
+    let mut out = [0u8; 8];
+    out[..2].copy_from_slice(&c0.to_le_bytes());
+    out[2..4].copy_from_slice(&c1.to_le_bytes());
+    out[4..].copy_from_slice(&indices.to_le_bytes());
+    out
+}
+
+pub fn decode_iwi_texture_native(
+    bytes: &[u8],
+    sampler_state: u8,
+    use_srgb_reads: bool,
+) -> Result<Image, String> {
+    let mips = decode_iwi_mips_with(bytes, true)?;
+    let wrap = WrapRecipe {
+        sampler_state,
+        is_normal: false,
+        alpha_test_color: false,
+        force_linear: !use_srgb_reads,
+        use_srgb_reads,
+    };
+    let data = mips.packed.clone();
+    Ok(wrap_mips(&mips, data, wrap))
+}
+
+pub fn with_opaque_alpha(image: &Image) -> Image {
+    let mut image = image.clone();
+    let format = image.texture_descriptor.format;
+    let Some(data) = image.data.as_mut() else {
+        return image;
+    };
+    match format {
+        TextureFormat::Bc2RgbaUnorm | TextureFormat::Bc2RgbaUnormSrgb => {
+            for block in data.as_chunks_mut::<16>().0 {
+                block[..8].fill(0xff);
+            }
+        }
+        TextureFormat::Bc3RgbaUnorm | TextureFormat::Bc3RgbaUnormSrgb => {
+            for block in data.as_chunks_mut::<16>().0 {
+                block[..2].fill(0xff);
+                block[2..8].fill(0);
+            }
+        }
+        TextureFormat::Rgba8Unorm
+        | TextureFormat::Rgba8UnormSrgb
+        | TextureFormat::Bgra8Unorm
+        | TextureFormat::Bgra8UnormSrgb => {
+            for texel in data.as_chunks_mut::<4>().0 {
+                texel[3] = 0xff;
+            }
+        }
+        _ => {}
+    }
+    image
+}
+
+pub fn solid_texture(rgba: [u8; 4], srgb: bool) -> Image {
+    let mips = DecodedMips::single(1, 1, rgba.to_vec());
+    let wrap = WrapRecipe {
+        sampler_state: 0,
+        is_normal: false,
+        alpha_test_color: false,
+        force_linear: !srgb,
+        use_srgb_reads: srgb,
+    };
+    wrap_mips(&mips, rgba.to_vec(), wrap)
 }
 
 fn iwi_pixel_format(format: u8) -> Result<PixelFormat, String> {
@@ -1723,6 +2160,7 @@ fn iwi_pixel_format(format: u8) -> Result<PixelFormat, String> {
         11 => Ok(PixelFormat::Bc1),
         12 => Ok(PixelFormat::Bc2),
         13 => Ok(PixelFormat::Bc3),
+        14 => Ok(PixelFormat::Bc5),
         format => Err(format!("unsupported IWI format {format}")),
     }
 }
@@ -1738,7 +2176,7 @@ fn compressed_mip_bytes(width: u32, height: u32, format: PixelFormat) -> usize {
         PixelFormat::La8 => width as usize * height as usize * 2,
         PixelFormat::L8 | PixelFormat::A8 => width as usize * height as usize,
         PixelFormat::Bc1 => width.div_ceil(4) as usize * height.div_ceil(4) as usize * 8,
-        PixelFormat::Bc2 | PixelFormat::Bc3 => {
+        PixelFormat::Bc2 | PixelFormat::Bc3 | PixelFormat::Bc5 => {
             width.div_ceil(4) as usize * height.div_ceil(4) as usize * 16
         }
     }
@@ -1768,7 +2206,7 @@ fn decode_gfx_image(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PixelFormat {
     Rgb8,
     Bgra8,
@@ -1779,6 +2217,48 @@ enum PixelFormat {
     Bc1,
     Bc2,
     Bc3,
+    Bc5,
+}
+
+fn bc5_block_to_dxt5nm(src: &[u8]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&src[..8]);
+    let mut y = [0u8; 16];
+    bcdec_rs::bc4(&src[8..16], &mut y, 4, false);
+    let (lo, hi) = y
+        .iter()
+        .fold((u8::MAX, 0u8), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let (g0, g1) = (u16::from(hi >> 2), u16::from(lo >> 2));
+    let expand = |g6: u16| f32::from(((g6 << 2) | (g6 >> 4)) as u8);
+    let palette = if g0 > g1 {
+        let (p0, p1) = (expand(g0), expand(g1));
+        [p0, p1, (2.0 * p0 + p1) / 3.0, (p0 + 2.0 * p1) / 3.0]
+    } else {
+        [expand(g0); 4]
+    };
+    out[8..10].copy_from_slice(&(g0 << 5).to_le_bytes());
+    out[10..12].copy_from_slice(&(g1 << 5).to_le_bytes());
+    let mut indices = 0u32;
+    for (i, &v) in y.iter().enumerate() {
+        let best = (0..4)
+            .min_by(|&a, &b| {
+                (palette[a] - f32::from(v))
+                    .abs()
+                    .total_cmp(&(palette[b] - f32::from(v)).abs())
+            })
+            .unwrap_or(0) as u32;
+        indices |= best << (2 * i);
+    }
+    out[12..16].copy_from_slice(&indices.to_le_bytes());
+    out
+}
+
+fn bc5_to_dxt5nm(data: &[u8]) -> Vec<u8> {
+    data.as_chunks::<16>()
+        .0
+        .iter()
+        .flat_map(|block| bc5_block_to_dxt5nm(block))
+        .collect()
 }
 
 fn decode_pixels(
@@ -1833,6 +2313,7 @@ fn decode_pixels(
         PixelFormat::Bc1 | PixelFormat::Bc2 | PixelFormat::Bc3 => {
             decode_blocks(data, width, height, format)?
         }
+        PixelFormat::Bc5 => decode_blocks(&bc5_to_dxt5nm(data), width, height, PixelFormat::Bc3)?,
     };
     Ok((width, height, pixels))
 }
@@ -1941,6 +2422,11 @@ fn decode_blocks(
 pub fn lit_color(albedo_rgb: [f32; 3], lighting: [f32; 3]) -> [f32; 3] {
     let albedo = lighting_iw4::lit_albedo(albedo_rgb, [1.0, 1.0, 1.0]);
     lighting_iw4::lit_fragment_color(albedo, lighting, [0.0, 0.0, 0.0])
+}
+
+pub fn decode_iwi_cubemap_native(bytes: &[u8], srgb: bool) -> Result<Image, String> {
+    let (size, faces) = decode_iwi_cubemap(bytes)?;
+    Ok(pack_material_cubemap(size, &faces, srgb))
 }
 
 fn decode_iwi_cubemap(bytes: &[u8]) -> Result<(u32, CubemapFaces), String> {
@@ -2440,7 +2926,7 @@ impl ImageDemandPlan {
     /// row carrying the plan's id, whether or not the plan had anything to put
     /// there. A plan that [`Self::prune_to`] emptied never reaches `apply`, so
     /// without this its rows keep a mark saying a decode is owed on them —
-    /// and [`requested_color_map_slots`] and [`requested_keyed_2d_slots`] read
+    /// and [`requested_color_map_slots`] and [`requested_keyed_image_slots`] read
     /// that mark as "somebody else is already handling this name" and skip the
     /// row. Every row still marked here was answered by another plan, which is
     /// why the plan is empty; the count is that plan's `already_decoded`.
@@ -2884,14 +3370,26 @@ fn claim(
     inline
 }
 
-pub fn plan_color_or_2d_for_keys(
+pub fn plan_material_images_for_keys(
+    zone_ff: &Path,
+    catalog: &mut MaterialDefinitions,
+    keys: impl IntoIterator<Item = crate::MaterialKey>,
+    stage: &StageHandle,
+    pool: &TaskPool,
+) -> ImageDemandPlan {
+    let mut plan = ImageDemandPlan::new(zone_ff);
+    plan_images_for_keys(&mut plan, catalog, keys, stage, pool);
+    plan
+}
+
+pub fn plan_images_for_keys(
     plan: &mut ImageDemandPlan,
     catalog: &mut MaterialDefinitions,
     keys: impl IntoIterator<Item = crate::MaterialKey>,
     stage: &StageHandle,
     pool: &TaskPool,
 ) -> usize {
-    let requested = requested_keyed_2d_slots(catalog, keys);
+    let requested = requested_keyed_image_slots(catalog, keys);
     let inline = claim(catalog, plan, requested);
     decode_inline(catalog, &inline, stage, pool).decoded
 }

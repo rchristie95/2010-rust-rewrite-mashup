@@ -64,10 +64,7 @@ impl ZoneLane for T5Lane {
         progress: &LoadProgress,
         _shared_surfaces: asset_model::SharedXModelSurfaces,
         material_seed: asset_material::MaterialCatalog,
-        _common_film_visions: &mut std::collections::BTreeMap<
-            String,
-            Result<asset_world::FilmVision, asset_world::FilmVisionParseError>,
-        >,
+        _common_film_visions: &super::FilmVisionCatalog,
     ) -> LoadedWorld {
         let mut report = vec![format!("game: T5 ({})", path.display())];
         let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
@@ -436,6 +433,7 @@ impl ZoneLane for T5Lane {
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
+                        source_namespace: Some(asset_core::AssetNamespace::T5),
                         draw: Some(draw),
                         dynamic_light: None,
                         static_model_meshes,
@@ -456,6 +454,7 @@ impl ZoneLane for T5Lane {
                         reflection_probe_images,
                         intermission_view,
                         exp_fog,
+                        t6_film_grade: None,
                         film_vision: None,
                         film_visions: Default::default(),
                         createart_name,
@@ -607,11 +606,8 @@ impl ZoneLane for T5Lane {
                 && sink.world_weapons.get(namespace, name).is_none()
                 && let Some(entry) = sink.projectile_meshes.get(namespace, name)
             {
-                sink.world_weapons.insert_in(
-                    namespace,
-                    (*entry.skel).clone(),
-                    Some(&sink.materials),
-                );
+                sink.world_weapons
+                    .insert_in(namespace, entry.skel.clone(), Some(&sink.materials));
             }
         }
         sink.projectile_meshes.keep_referenced(&projectile_keys);
@@ -788,7 +784,7 @@ fn absorb_localized_map_sound(path: &Path, catalog: &mut asset_audio::SoundCatal
         let walked = fastfile_t5::load_zone(&mut stream, &mut sink).map(|_| ());
         let sound = sink.sound.take().ok_or("sound capture dropped")?;
         let part = sound.finish(walked.map_err(|e| e.to_string()))?;
-        let aliases = part.sounds.len();
+        let aliases = part.sounds().len();
         Ok((part, aliases))
     };
     match walk() {
