@@ -153,6 +153,16 @@ pub const XMODEL_OBJECT_ID_VIEWMODEL: u16 = 1;
 
 pub const RENDER_FX_DEPTH_HACK: u32 = 2;
 
+/// A scene entity drawn in the view model's depth band, in front of the
+/// world like the view model (the Minecraft inventory's character), or
+/// `u32::MAX` for none.
+pub static DEPTH_HACK_SCENE_ENTNUM: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+pub fn depth_hack_scene_entnum(entnum: Option<u32>) -> bool {
+    entnum.is_some_and(|e| e == DEPTH_HACK_SCENE_ENTNUM.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[must_use]
 pub const fn host_viewmodel_render_fx_flags(object_id: u16) -> u32 {
     if object_id == XMODEL_OBJECT_ID_VIEWMODEL {

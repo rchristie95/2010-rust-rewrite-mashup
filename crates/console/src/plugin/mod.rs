@@ -79,6 +79,10 @@ pub struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            crate::debug_move::update_skate_overlay.in_set(ClientSet::Ui),
+        );
         crate::startup::install_stdin(app);
         app.init_resource::<ConsoleSettings>()
             .init_resource::<ConsoleState>()
@@ -310,6 +314,7 @@ struct PhysicalInputState {
 }
 
 fn publish_client_action_input(
+    mut skate: ResMut<frame::SkateMode>,
     // The clock `sample_client_input` reads: a press and the samples that
     // time its hold must agree.
     time: Res<Time<Real>>,
@@ -321,7 +326,10 @@ fn publish_client_action_input(
     binds: Res<KeyBinds>,
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
-    script_menus: Option<Res<hud::ScriptMenus>>,
+    (script_menus, minecraft): (
+        Option<Res<hud::ScriptMenus>>,
+        Option<Res<frame::MinecraftUi>>,
+    ),
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
@@ -374,8 +382,22 @@ fn publish_client_action_input(
     if binds.is_changed() {
         *wheel_carry = 0.0;
     }
+    let script_menu = script_menus.is_some_and(|menus| menus.captures_input());
+    let inventory_open = minecraft.is_some_and(|ui| ui.active && ui.inventory_open);
+    skate.input_blocked = console.open || script_menu;
+    // J, or clicking both sticks in together, toggles skating.
+    let sticks_clicked = pad.is_some_and(|pad| {
+        use bevy::input::gamepad::GamepadButton::{LeftThumb, RightThumb};
+        pad.pressed(LeftThumb)
+            && pad.pressed(RightThumb)
+            && (pad.just_pressed(LeftThumb) || pad.just_pressed(RightThumb))
+    });
+    if !skate.input_blocked && (keys.just_pressed(KeyCode::KeyJ) || sticks_clicked) {
+        skate.toggle_requested = true;
+    }
     let modal_captured = console.open
-        || script_menus.is_some_and(|menus| menus.captures_input())
+        || script_menu
+        || inventory_open
         || keys.just_pressed(KeyCode::Escape)
         || pad.is_some_and(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
     let captured = !devices.focused || modal_captured;
@@ -595,6 +617,7 @@ fn publish_client_action_input(
 fn sync_cursor_grab(
     console: Res<ConsoleState>,
     script_menus: Option<Res<hud::ScriptMenus>>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
     screen: Option<Res<AppScreen>>,
     mut focused: MessageReader<WindowFocused>,
     mut entered: MessageReader<CursorEntered>,
@@ -606,7 +629,8 @@ fn sync_cursor_grab(
     }
     returned |= entered.read().count() > 0;
 
-    let menu_open = script_menus.is_some_and(|m| m.captures_input());
+    let menu_open = script_menus.is_some_and(|m| m.captures_input())
+        || minecraft.is_some_and(|ui| ui.active && ui.inventory_open);
     let in_game = screen
         .as_ref()
         .is_some_and(|s| matches!(**s, AppScreen::InGame));

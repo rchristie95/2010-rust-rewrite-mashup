@@ -225,7 +225,7 @@ fn approve_map_load(
             continue;
         }
         let games = asset_transport::GamesRoot(identity.games_root.clone());
-        let found = asset_transport::find_zone_file(&games, &request.zone);
+        let found = crate::minecraft_map::find_zone_file(&games, &request.zone);
         let zone = found
             .as_ref()
             .map(|zone| zone.zone_name.clone())

@@ -623,6 +623,7 @@ pub struct SimState {
 
     pending_final_kill: Option<(ClientId, ClientId)>,
 
+    pub(crate) external_motion: std::collections::HashSet<ClientId>,
     last_pmove_walking: HashMap<ClientId, i32>,
 
     stuck_holdrand: u32,
@@ -720,6 +721,7 @@ impl Default for SimState {
             pending_local_sounds: Vec::new(),
             pending_script_audio: Vec::new(),
             pending_final_kill: None,
+            external_motion: Default::default(),
             last_pmove_walking: HashMap::new(),
             stuck_holdrand: 0,
             last_stuck_ejects: Vec::new(),
@@ -1536,6 +1538,7 @@ impl SimState {
         self.player_dobjs.remove(&id.0);
         self.lagcomp_sample.remove(&id);
         self.lagcomp_commands.retain(|(client, _), _| *client != id);
+        self.external_motion.remove(&id);
         self.last_pmove_walking.remove(&id);
         self.last_anim_movement.remove(&id);
         self.anim_command_buttons.remove(&id);
@@ -1915,6 +1918,9 @@ impl SimState {
             mask,
             &|piece| !ignore_glass && self.world_objects.glass_is_solid(piece as u32),
         );
+        if crate::voxel::active_for(clip_brushes) {
+            return world_hit;
+        }
         let linked = self
             .entity_collision_capabilities
             .iter()
@@ -2891,9 +2897,11 @@ impl SimState {
         query: crate::bullet_collision::BulletTraceQuery,
         poses: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::TraceOutcome {
+        let voxel = crate::voxel::active_for(&self.content.data.clip_brushes);
         let geoms: Vec<EntityCollisionTraceGeom> = self
             .entity_collision_capabilities
             .iter()
+            .filter(|_| !voxel)
             .filter(|capabilities| {
                 capabilities.ray_may_hit(&self.content.data.clip_cmodels, query.start, query.end)
             })
@@ -3138,7 +3146,7 @@ impl SimState {
                 match_elapsed_ms: self.match_elapsed_ms,
                 prematch: self.prematch,
                 score_limit: self.bootstrap.score_limit,
-                time_limit_ms: self.bootstrap.time_limit_ms,
+                time_limit_ms: if crate::voxel::active() { 0 } else { self.bootstrap.time_limit_ms },
                 kind: self.bootstrap.kind,
                 clients,
                 journal: self.journal.clone(),
@@ -3979,6 +3987,10 @@ pub(crate) fn clip_trace(
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> trace_iw4::Trace {
     use std::cell::Cell;
+
+    if crate::voxel::active_for(brushes) {
+        return crate::voxel::trace(start, end, mins, maxs);
+    }
 
     let map = clipmap_iw4::ClipMapRef {
         nodes: &bsp.nodes,

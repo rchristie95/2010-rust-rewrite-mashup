@@ -460,6 +460,60 @@ pub fn sample_light_grid_with_lookup_fallback(
     sample_light_grid_at(grid, pos, None, lookup_fallback)
 }
 
+/// A sample for a world the grid does not describe: the same grey from
+/// every direction, bright enough that white renders white, and no primary
+/// light. Minecraft's own lighting is applied over it.
+pub fn neutral_light_grid_sample(grid: &GridView<'_>) -> Result<SampledLighting, BlockedReason> {
+    if grid.color_encoding != LightGridColorEncoding::Rgb8 {
+        return Err(BlockedReason::TruncatedZoneData);
+    }
+    let shell = |grey: u8| -> Option<(
+        [u8; LIGHT_GRID_COLORS_BYTE_COUNT],
+        lighting_iw4::LightGridCompressedColor,
+        [u8; MODEL_LIGHTING_TILE_BYTES],
+    )> {
+        let colors = [grey; LIGHT_GRID_COLORS_BYTE_COUNT];
+        let compressed = light_grid_compress_colors(&colors, 0xff)?;
+        let mut tile = [0u8; MODEL_LIGHTING_TILE_BYTES];
+        light_grid_expand_shell_to_tile_rgba(&colors, compressed.weight, &mut tile)
+            .then_some((colors, compressed, tile))
+    };
+    static WHITE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let grey = *WHITE.get_or_init(|| {
+        (0..=255u8)
+            .min_by(|&a, &b| {
+                let error = |grey| {
+                    shell(grey).map_or(f32::MAX, |(_, _, tile)| {
+                        (lit_fragment_white_from_tile(&tile)[1] - 1.0).abs()
+                    })
+                };
+                error(a).total_cmp(&error(b))
+            })
+            .unwrap_or(128)
+    });
+    let (colors, compressed, tile) = shell(grey).ok_or(BlockedReason::TruncatedZoneData)?;
+    Ok(SampledLighting {
+        live_corners: 0,
+        weights: [0.0; 8],
+        path: LightGridAtPointPath::SetDefault,
+        sample_count: 0,
+        matching_primary: 0.0,
+        traced_influence: 0.0,
+        total: 0.0,
+        picked_primary: 0,
+        picked_before_remap: 0,
+        corner_primaries: [None; 8],
+        needs_trace_flag: false,
+        corners_needing_sight: 0,
+        corners_sight_cleared: 0,
+        corners_sight_suppressed: 0,
+        colors,
+        compressed: [compressed.r, compressed.g, compressed.b],
+        tile,
+        lighting_sh: None,
+    })
+}
+
 fn sample_light_grid_at(
     grid: &GridView<'_>,
     pos: [f32; 3],

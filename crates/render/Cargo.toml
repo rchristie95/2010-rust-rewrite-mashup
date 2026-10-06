@@ -6,6 +6,8 @@ license.workspace = true
 description = "Snapshot to pixels: scene, viewmodel, effects. No game logic."
 
 [dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+minecraft_terrain = { path = "../minecraft_terrain" }
 diag.workspace = true
 bevy.workspace = true
 fx.workspace = true

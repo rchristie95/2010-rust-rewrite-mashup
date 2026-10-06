@@ -53,7 +53,8 @@ pub fn content_required_by_map(map: &str) -> Result<ContentFlags> {
         .split_once(':')
         .map_or("iw4", |(namespace, _)| namespace);
     Ok(ContentFlags(match namespace {
-        "iw4" => CONTENT_IW4,
+        // A Minecraft map stands on an IW4 map for its weapons and bodies.
+        "iw4" | "minecraft" => CONTENT_IW4,
         "iw5" => CONTENT_IW5,
         "t5" => CONTENT_T5,
         "t6" => CONTENT_T6,

@@ -13,8 +13,15 @@ use crate::{
 
 #[derive(Component)]
 pub(crate) struct ShowposHud;
+#[derive(Component)]
+pub(crate) struct SkateHud;
 
 pub(crate) fn spawn_showpos_hud(commands: &mut Commands, font: Handle<Font>) {
+    commands.spawn((SkateHud, UiLayer::Overlay, Visibility::Hidden,
+        Node { position_type: PositionType::Absolute, bottom:px(24), left:px(24),padding:UiRect::all(px(8)), ..default() },
+        BackgroundColor(Color::srgba(0.02,0.03,0.04,0.7)),GlobalZIndex(19000),Text::new(""),
+        TextFont{font:font.clone().into(),font_size:FontSize::Px(18.),..default()},TextColor(Color::WHITE)));
+
     commands.spawn((
         ShowposHud,
         UiLayer::Overlay,
@@ -39,6 +46,7 @@ pub(crate) fn spawn_showpos_hud(commands: &mut Commands, font: Handle<Font>) {
 }
 
 pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
+    registry.register(crate::CommandSpec::new("skate").usage("skate [on|off|status] - local Skate gameplay (J toggles)"));
     if registry.resolve("showpos").is_none() {
         registry.register(
             crate::CommandSpec::new("showpos")
@@ -101,6 +109,7 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
 }
 
 pub(crate) fn route_debug_move_commands(
+    mut skate: ResMut<frame::SkateMode>,
     mut events: MessageReader<ConsoleCommand>,
     mut console: ResMut<ConsoleState>,
     settings: Res<ConsoleSettings>,
@@ -123,6 +132,17 @@ pub(crate) fn route_debug_move_commands(
 
     for cmd in events.read() {
         match cmd.name.as_str() {
+            "skate" => {
+                match cmd.args.first().map(String::as_str) {
+                    Some("status") => {},
+                    Some("on") => { skate.toggle_requested = !skate.active && !skate.entering; },
+                    Some("off") => { skate.toggle_requested = skate.active || skate.entering; },
+                    None => { skate.toggle_requested = true; },
+                    _ => { echo("usage: skate [on|off|status]".into(), &mut console, &mut line); continue; }
+                }
+                echo(format!("skate active={} ready={} controller={:?} tick={} {}",skate.active,skate.preloaded,skate.controller,skate.tick,skate.status),&mut console,&mut line);
+            }
+
             "showpos" | "debug_pos" => match cmd.args.first().map(String::as_str) {
                 None => {
                     debug_pos.0 = true;
@@ -826,5 +846,16 @@ fn parse_force_spawn(args: &[String]) -> Result<SpawnPick, String> {
             yaw: args.get(4).map(num).transpose()?.unwrap_or(0.0),
         }),
         Some(_) => Err(USAGE.into()),
+    }
+}
+
+pub(crate) fn update_skate_overlay(mode:Res<frame::SkateMode>,mut hud:Query<(&mut Text,&mut Visibility),With<SkateHud>>) {
+    for (mut text,mut visibility) in &mut hud {
+        let failed = !mode.preloaded && !mode.preload_pending && !mode.status.is_empty();
+        *visibility=if mode.active || mode.entering || failed {Visibility::Visible}else{Visibility::Hidden};
+        **text=if failed {format!("Skate unavailable: {}", mode.status)}
+        else if mode.entering && !mode.preloaded {"Skate is finishing map preparation... | J: cancel".into()}
+        else if mode.controller.is_none() {"SKATE | Connect a controller | J: return to MW2".into()}
+        else {"SKATE | Original controller controls | Start: pause | J: return to MW2".into()};
     }
 }

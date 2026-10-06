@@ -207,6 +207,7 @@ pub fn tick_session_view_kick(
 }
 
 pub fn sync_camera_from_presented(
+    skate: Res<frame::SkateMode>,
     mut killcam: Local<super::killcam::KillcamCamera>,
     clock: Res<FrameClock>,
     presented: Res<PresentedSnapshot>,
@@ -236,6 +237,30 @@ pub fn sync_camera_from_presented(
     let Some(ps) = presented.player(local.0) else {
         return;
     };
+    if skate.active
+        && let Some((eye, fov)) = skate.camera
+    {
+        for mut transform in &mut q {
+            *transform = eye;
+        }
+        for mut projection in &mut lenses {
+            if let Projection::Perspective(p) = &mut *projection {
+                p.fov = fov.to_radians();
+            }
+        }
+        let forward = eye.forward();
+        // Skate publishes vertical FOV; IW4's refdef uses a 4:3 horizontal FOV.
+        kick.horiz_fov_deg = (2.0
+            * ((fov.to_radians() * 0.5).tan() / hud_iw4::fov::CG_TANHALF_FOV_Y_SCALE).atan())
+        .to_degrees();
+        kick.refdef_vieworg = eye.translation.to_array();
+        kick.refdef_view_angles = [
+            (-forward.z).asin().to_degrees(),
+            forward.y.atan2(forward.x).to_degrees(),
+            0.,
+        ];
+        return;
+    }
     let viewmodel = get_viewmodel_weapon_index(ps);
     if let Some((pose, fov, focus_distance)) = killcam.update(
         &presented,

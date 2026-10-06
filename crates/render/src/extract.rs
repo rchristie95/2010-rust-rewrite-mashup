@@ -727,6 +727,7 @@ pub fn extract_postfx(
     glow_dvars: Extract<Res<render_frontend::assemble::drawsurf::dof::GlowDvars>>,
     draw_method: Extract<Res<render_frontend::assemble::drawsurf::ColourDrawMethod>>,
     scene: Extract<Option<Res<render_frontend::prepare::scene::world::WorldScene>>>,
+    minecraft: Extract<Option<Res<render_anim::minecraft_world::MinecraftWorldView>>>,
     mut extracted: ResMut<render_gpu::ExtractedPostFx>,
 ) {
     use render_frontend::assemble::drawsurf::postfx_plan::RuntimePostFxResources;
@@ -778,7 +779,13 @@ pub fn extract_postfx(
             texture_slots: blood.texture_slots.clone(),
         });
     }
-    extracted.vision = film.current;
+    // The Minecraft world is graded by its own lightmap and fog, not by the
+    // film tweaks and glow of the map it stands in for.
+    extracted.vision = if minecraft.as_ref().is_some_and(|view| view.active) {
+        None
+    } else {
+        film.current
+    };
     extracted.t6_film_grade = scene.as_ref().and_then(|scene| scene.t6_film_grade);
     extracted.frame = render_gpu::DofFrame {
         dof: render_gpu::DepthOfField {
@@ -933,4 +940,121 @@ pub fn extract_model_lighting_tiles(
                 texels: tile.texels,
             }),
     );
+}
+
+/// Moves the Minecraft world's new section meshes and state to the render
+/// world, converting the atlas once per world.
+pub fn extract_minecraft_world(
+    mut main_world: ResMut<bevy::render::MainWorld>,
+    mut frame: ResMut<render_gpu::MinecraftWorldFrame>,
+    mut atlas_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
+    mut celestial_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
+    mut clouds_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftClouds>)>>,
+    mut cracks_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
+) {
+    let Some(mut view) =
+        main_world.get_resource_mut::<render_anim::minecraft_world::MinecraftWorldView>()
+    else {
+        return;
+    };
+    frame.active = view.active;
+    frame.origin = view.origin;
+    frame.view_distance = 8.0;
+    if frame.generation != view.generation {
+        frame.generation = view.generation;
+        frame.uploads.clear();
+        frame.removed.clear();
+    }
+    frame.atlas = view.atlas.as_ref().map(|atlas| {
+        let key = std::sync::Arc::as_ptr(atlas) as usize;
+        if let Some((held, converted)) = atlas_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let mut levels = vec![atlas.pixels.as_raw().clone()];
+        levels.extend(atlas.mipmaps.iter().map(|level| level.as_raw().clone()));
+        let converted = std::sync::Arc::new(render_gpu::MinecraftAtlasImage {
+            width: atlas.pixels.width(),
+            height: atlas.pixels.height(),
+            levels,
+        });
+        *atlas_of = Some((key, converted.clone()));
+        converted
+    });
+    let to_pos = |p: minecraft_terrain::sections::SectionPos| [p.0, p.1, p.2];
+    frame.removed.extend(view.removed.drain(..).map(to_pos));
+    frame
+        .uploads
+        .extend(
+            view.uploads
+                .drain(..)
+                .map(|(pos, mesh)| render_gpu::MinecraftSectionUpload {
+                    pos: to_pos(pos),
+                    vertices: bytemuck::cast_slice(&mesh.vertices).to_vec(),
+                    indices: mesh.indices,
+                    transparent_start: mesh.transparent_start,
+                }),
+        );
+    frame.visible = view.visible.iter().map(|(pos, _)| to_pos(*pos)).collect();
+    frame.environment = view.environment;
+    frame.eye_light = view.eye_light;
+    frame.light_volume = view.light_volume.clone();
+    frame.particles = std::mem::take(&mut view.particles);
+    frame.cracks = std::mem::take(&mut view.cracks);
+    frame.entity_meshes = std::mem::take(&mut view.entity_meshes);
+    frame.backdrop = view.backdrop;
+    frame.hand = std::mem::take(&mut view.hand);
+    frame.hand_clip = view.hand_clip;
+    frame.crack_texture = view.crack_texture.as_ref().map(|image| {
+        let key = std::sync::Arc::as_ptr(image) as usize;
+        if let Some((held, converted)) = cracks_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let converted = std::sync::Arc::new(render_gpu::MinecraftAtlasImage {
+            width: image.width(),
+            height: image.height(),
+            levels: vec![image.as_raw().clone()],
+        });
+        *cracks_of = Some((key, converted.clone()));
+        converted
+    });
+    frame.celestial = view.celestial.as_ref().map(|image| {
+        let key = std::sync::Arc::as_ptr(image) as usize;
+        if let Some((held, converted)) = celestial_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let converted = std::sync::Arc::new(render_gpu::MinecraftAtlasImage {
+            width: image.width(),
+            height: image.height(),
+            levels: vec![image.as_raw().clone()],
+        });
+        *celestial_of = Some((key, converted.clone()));
+        converted
+    });
+    frame.clouds = view.clouds.as_ref().map(|clouds| {
+        let key = std::sync::Arc::as_ptr(clouds) as usize;
+        if let Some((held, converted)) = clouds_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let converted = std::sync::Arc::new(render_gpu::MinecraftClouds {
+            vertices: clouds
+                .0
+                .iter()
+                .map(|v| {
+                    let (p, c) = (v.position, v.color);
+                    [p[0], p[1], p[2], c[0], c[1], c[2], c[3]]
+                })
+                .collect(),
+            indices: clouds.1.clone(),
+        });
+        *clouds_of = Some((key, converted.clone()));
+        converted
+    });
 }

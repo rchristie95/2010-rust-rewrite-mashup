@@ -196,6 +196,8 @@ pub struct HudTessPass {
     pub hud_elems: TessJob,
     pub hud_elems_back: TessJob,
     pub script_menus: TessJob,
+    /// The Minecraft map's hotbar and inventory.
+    pub minecraft: TessJob,
 }
 
 /// What the HUD tess flush systems' own bodies cost this frame.

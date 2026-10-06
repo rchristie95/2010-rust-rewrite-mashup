@@ -335,6 +335,12 @@ fn run_players_system(ecs: &mut World) {
                 continue;
             }
 
+            // A local external controller publishes the complete player position.
+            // Keep command acknowledgement moving without also applying PMove.
+            if world.external_motion.contains(id) {
+                if let Some(ps) = world.player_mut(*id) { ps.command_time = cmd.server_time; }
+                continue;
+            }
             let old_buttons = world
                 .old_buttons_mut()
                 .iter()
@@ -578,6 +584,8 @@ fn run_players_system(ecs: &mut World) {
 
     *world.old_buttons_mut() = original_buttons;
     *world.old_cmd_angles_mut() = original_angles;
+    crate::damage::apply_block_world_damage(&mut world, tick);
+    crate::item::sustain_block_world_arsenal(&mut world);
 
     if world.publishes_snapshot() {
         crate::script::apply_player_links(world.ecs());

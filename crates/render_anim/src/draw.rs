@@ -10,6 +10,8 @@ pub struct FpvSurfaceDraw {
     pub material: u32,
 
     pub is_scope: bool,
+    /// A surface of the hands model rather than the gun's.
+    pub hands: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -230,6 +232,8 @@ pub struct FpvDrawPlan {
     pub(crate) surface_ranges: Vec<(u32, u32)>,
     pub(crate) materials: Vec<SmodelPassMaterial>,
     pub(crate) draws: Vec<FpvSurfaceDraw>,
+    /// The draws were cut down to the hands alone.
+    pub(crate) hands_only: bool,
 
     pub world_from_local: Mat4,
     pub lighting_handle: u32,

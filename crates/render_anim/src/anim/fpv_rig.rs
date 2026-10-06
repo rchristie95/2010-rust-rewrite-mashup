@@ -437,6 +437,7 @@ impl PreparedFpvRig {
                     surface: range_index,
                     material: material_index,
                     is_scope: is_scope && !is_lens,
+                    hands: part.owner == FpvSurfOwner::Hands,
                 });
                 if hand == 0 {
                     match part.owner {

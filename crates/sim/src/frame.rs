@@ -393,6 +393,18 @@ impl FrameWorld<'_> {
         true
     }
 
+    /// Moves a player as a spawn or teleport does: stopped, and marked so
+    /// prediction takes the new place instead of smoothing to it.
+    pub fn teleport(&mut self, id: ClientId, origin: [f32; 3]) -> bool {
+        if !self.set_origin(id, origin) {
+            return false;
+        }
+        if let Some(ps) = self.player_mut(id) {
+            ps.e_flags ^= playerstate_iw4::eflags::TELEPORT;
+        }
+        true
+    }
+
     pub fn set_legs_anim(&mut self, id: ClientId, legs_anim: i32) -> bool {
         let Some(ps) = self.player_mut(id) else {
             return false;

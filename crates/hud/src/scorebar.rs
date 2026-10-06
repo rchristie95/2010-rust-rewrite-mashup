@@ -294,12 +294,14 @@ pub(crate) fn update_scorebar(
     mut pass: ResMut<HudTessPass>,
     mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
     view: Option<Res<frame::ViewSubject>>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
     vis_input: crate::weaponbar::HudPlayerVisInput,
 ) {
     if !surface.is_ready() {
         return;
     }
-    if view.is_some_and(|v| v.in_killcam()) {
+    // A Minecraft world has no match clock or score to show.
+    if view.is_some_and(|v| v.in_killcam()) || minecraft.is_some_and(|ui| ui.active) {
         hide(&mut pass);
         return;
     }

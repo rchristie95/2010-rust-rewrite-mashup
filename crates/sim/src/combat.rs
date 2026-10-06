@@ -1318,6 +1318,29 @@ pub(crate) fn phase_trace(
             continue;
         }
         let mut glass_hit: Vec<u32> = Vec::new();
+        let mut mob_shot = false;
+        if world.publishes_snapshot() && crate::voxel::active() {
+            let first_surface = segments
+                .iter()
+                .find(|s| matches!(s.collider, None | Some(ColliderId::World { .. })))
+                .map_or(end, |s| s.end);
+            let mut stop = first_surface;
+            if let Some((key, dist, up)) = crate::voxel::mob_on_segment(em.origin, first_surface) {
+                // As a player hit: the weapon's damage at that range, times
+                // its multiplier for where on the body it struck.
+                let scale = facts.location_scale(crate::voxel::mob_hitloc(up));
+                let damage = bullet_damage_at_distance(&facts, dist).max(0) as f32 * scale;
+                crate::voxel::push_mob_shot(key, damage, em.origin);
+                mob_shot = true;
+                let length = {
+                    let d: [f32; 3] = std::array::from_fn(|k| first_surface[k] - em.origin[k]);
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3)
+                };
+                stop = std::array::from_fn(|k| em.origin[k] + (first_surface[k] - em.origin[k]) * (dist / length));
+            }
+            let ray_damage = bullet_damage_at_distance(&facts, 0.0).max(0) as f32;
+            crate::voxel::push_ray(em.origin, stop, ray_damage);
+        }
         for segment in &segments {
             let exit = segment.surface_flags & fx_iw4::FX_IMPACT_EXIT_SURFACE_FLAG != 0;
             let dist = {
@@ -1415,6 +1438,15 @@ pub(crate) fn phase_trace(
                 Some(ColliderId::Player { client, .. }) => Some(client),
                 _ => None,
             };
+            if matches!(segment.collider, None | Some(ColliderId::World { .. }))
+                && !exit
+                && !mob_shot
+                && world.publishes_snapshot()
+                && crate::voxel::active()
+            {
+                let body = facts.location_scale(4).max(1.0);
+                crate::voxel::push_shot(segment.end, segment.normal, scaled.max(0) as f32 * body);
+            }
             if bullet_process_on_hit(segment.collider) {
                 if let Some(world_event) = entity_iw4::bullet_hit_event(
                     if segment_is_shield(segment.collider) {
@@ -1649,6 +1681,12 @@ fn fire_weapon_melee(
         return;
     };
     let amount = facts.melee_damage + (world.combat_rng_mut().next_u32() % 5) as i32;
+    if matches!(segment.collider, None | Some(ColliderId::World { .. }))
+        && world.publishes_snapshot()
+        && crate::voxel::active()
+    {
+        crate::voxel::push_shot(segment.end, segment.normal, amount as f32);
+    }
     let (kind, other) = match segment.collider {
         Some(ColliderId::Player { client, .. }) => {
             (entity_iw4::EntityEventKind::MELEE_HIT, client.0 as i32)

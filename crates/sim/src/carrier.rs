@@ -294,12 +294,20 @@ impl SimWorld {
         }
     }
 
+    pub fn set_external_motion(&mut self, id: ClientId, enabled: bool) {
+        if enabled { self.frame().external_motion.insert(id); } else { self.frame().external_motion.remove(&id); }
+    }
+
     pub fn set_origin(&mut self, id: ClientId, origin: [f32; 3]) -> bool {
         self.frame().set_origin(id, origin)
     }
 
     pub fn set_legs_anim(&mut self, id: ClientId, legs_anim: i32) -> bool {
         self.frame().set_legs_anim(id, legs_anim)
+    }
+
+    pub fn teleport(&mut self, id: ClientId, origin: [f32; 3]) -> bool {
+        self.frame().teleport(id, origin)
     }
 
     pub fn set_viewangles(&mut self, id: ClientId, viewangles: [f32; 3]) -> bool {

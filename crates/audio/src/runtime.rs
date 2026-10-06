@@ -79,6 +79,7 @@ struct LogicalInstance {
 pub struct AudioRuntime {
     shared: Arc<RenderShared>,
     cue_tx: SyncSender<CueRequest>,
+    pcm_tx: SyncSender<(RenderMedia, f32, f32, u64)>,
     media: Mutex<Option<MediaService>>,
     cue_mix: Mutex<Option<CueMix>>,
     cue_cancellation: CueCancellation,
@@ -107,6 +108,7 @@ impl AudioRuntime {
             .store(device_enabled, Ordering::Relaxed);
         let shutdown = Arc::new(AtomicBool::new(false));
         let (cue_tx, cue_rx) = sync_channel(LOGICAL_INSTANCES);
+        let (pcm_tx, pcm_rx) = sync_channel(CONTROL_BATCH);
         let thread_shared = shared.clone();
         let thread_shutdown = shutdown.clone();
         let sources = Arc::new(SourceInbox::new());
@@ -129,6 +131,7 @@ impl AudioRuntime {
                     thread_shared,
                     thread_shutdown,
                     cue_rx,
+                    pcm_rx,
                     device_enabled,
                     control_sources,
                     control_listener,
@@ -143,6 +146,7 @@ impl AudioRuntime {
         Self {
             shared,
             cue_tx,
+            pcm_tx,
             media: Mutex::new(None),
             cue_mix: Mutex::new(None),
             cue_cancellation: CueCancellation::default(),
@@ -164,6 +168,14 @@ impl AudioRuntime {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = verdicts;
         if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+    }
+
+    pub(crate) fn play_pcm(&self, media: RenderMedia, gain: f32, rate: f32, epoch: u64) {
+        if self.pcm_tx.try_send((media, gain, rate, epoch)).is_ok()
+            && let Some(worker) = &self.worker
+        {
             worker.thread().unpark();
         }
     }
@@ -422,6 +434,7 @@ fn control(
     shared: Arc<RenderShared>,
     shutdown: Arc<AtomicBool>,
     cue_rx: Receiver<CueRequest>,
+    pcm_rx: Receiver<(RenderMedia, f32, f32, u64)>,
     device_enabled: bool,
     sources: Arc<SourceInbox>,
     listener: Arc<ListenerState>,
@@ -469,6 +482,39 @@ fn control(
         diag_max_gap = diag_max_gap.max(diag_pass.duration_since(diag_previous_pass));
         diag_previous_pass = diag_pass;
         let listener = listener.get();
+        for _ in 0..CONTROL_BATCH {
+            let Ok((media, gain, rate, epoch)) = pcm_rx.try_recv() else {
+                break;
+            };
+            let admission = AdmissionPolicy::default();
+            let instance = make_instance(
+                next_id.fetch_add(1, Ordering::Relaxed),
+                AudioScope::Match,
+                epoch,
+                &admission,
+                Instant::now(),
+            );
+            set_parameters(&instance, gain, rate, true);
+            admit(
+                StartRequest {
+                    event: None,
+                    cancellation: None,
+                    spatial: None,
+                    admission,
+                    media,
+                    instance,
+                    looping: false,
+                    frame: shared.frame.load(Ordering::Acquire),
+                    start_deadline: Some(Instant::now() + Duration::from_millis(250)),
+                    protect_attack: false,
+                },
+                &shared,
+                &mut instances,
+                listener,
+                &rejections,
+                None,
+            );
+        }
         events.advance(event_context.get());
         let diag_stage = crate::diagnostics::slow_stage("context", diag_pass);
         for logical in &mut instances {

@@ -46,6 +46,7 @@ pub(super) struct ExactPipelinePlan {
     pub(super) multisample: MultisampleState,
     pub(super) constants_layout: BindGroupLayout,
     pub(super) textures_layout: BindGroupLayout,
+    pub(super) minecraft_layout: BindGroupLayout,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -222,10 +223,11 @@ fn build_port(
     let (shader, created) = match existing {
         Some(shader) => (shader, None),
         None => {
+            let wgsl = super::minecraft_light::hooked(source.wgsl());
             let shader = Arc::new(unsafe {
                 device.create_shader_module(ShaderModuleDescriptor {
                     label: Some(&label),
-                    source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source.wgsl())),
+                    source: ShaderSource::Wgsl(wgsl),
                 })
             });
             (shader.clone(), Some(shader))
@@ -249,7 +251,11 @@ fn build_pipeline(
 ) -> RenderPipeline {
     let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some(&plan.label),
-        bind_group_layouts: &[Some(&plan.constants_layout), Some(&plan.textures_layout)],
+        bind_group_layouts: &[
+            Some(&plan.constants_layout),
+            Some(&plan.textures_layout),
+            Some(&plan.minecraft_layout),
+        ],
         immediate_size: 0,
     });
     let buffers: Vec<RawVertexBufferLayout> = plan

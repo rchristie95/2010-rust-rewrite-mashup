@@ -76,13 +76,24 @@ pub(crate) fn update_reticle(
     settings: Res<frame::GameSettings>,
     cg_clock: Res<FrameClock>,
     mut quads: Query<(&ReticleQuad, &mut Node, &mut ImageNode, &mut UiTransform)>,
-    life: (MessageReader<LifeStarted>, Res<ViewSubject>),
+    life: (
+        MessageReader<LifeStarted>,
+        Res<ViewSubject>,
+        Option<Res<frame::SkateMode>>,
+        Option<Res<frame::MinecraftUi>>,
+    ),
 ) {
-    let (mut started, view) = life;
+    let (mut started, view, skate, minecraft) = life;
     for ev in started.read() {
         if ev.client == local.0.0 {
             *ads_latch = ReticleAdsLatch::default();
         }
+    }
+    if skate.is_some_and(|mode| mode.active)
+        || minecraft.is_some_and(|ui| ui.active && ui.inventory_open)
+    {
+        hide_all(&mut quads);
+        return;
     }
     if !surface.is_ready() {
         return;

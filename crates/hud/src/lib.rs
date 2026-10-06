@@ -18,6 +18,7 @@ mod killcam_skip;
 mod killfeed;
 mod mantle_hint;
 mod menus;
+mod minecraft_inventory;
 mod overhead_names;
 mod playercard;
 mod plugin;

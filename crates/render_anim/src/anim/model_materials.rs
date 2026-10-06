@@ -198,6 +198,23 @@ pub fn prepare_model_materials(
     let started = std::time::Instant::now();
     let mut by_key = HashMap::new();
     let mut refused = Vec::new();
+    for model in [
+        assets::bot_model::local_bot_model(),
+        assets::bot_model::local_skate_board(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let keys: Vec<_> = model
+            .surfaces
+            .iter()
+            .map(|surface| asset_core::MaterialKey {
+                namespace: asset_core::AssetNamespace::Iw4,
+                name: surface.material.clone(),
+            })
+            .collect();
+        admit_keys(&keys, &atlas, &tess.catalog(), &mut by_key, &mut refused);
+    }
     for name in bodies.0.names() {
         if let Some(entry) = bodies.0.get(name) {
             admit_keys(

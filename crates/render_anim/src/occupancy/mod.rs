@@ -1,3 +1,4 @@
+mod bot_model;
 pub mod dyn_ent;
 pub mod dyn_ent_phys;
 pub mod fpv_present;

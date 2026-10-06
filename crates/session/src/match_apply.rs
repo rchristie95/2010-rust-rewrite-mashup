@@ -1082,7 +1082,13 @@ fn preflight_match_install(
             })
             .collect(),
     };
-    let startup = sim::script::Iw4Startup::new(&sources, gametype, zone);
+    // The Minecraft world runs the level script of the map it stands in for.
+    let script_map = if assets::minecraft_map::is_minecraft_load(zone) {
+        assets::minecraft_map::PROXY_MAP
+    } else {
+        zone
+    };
+    let startup = sim::script::Iw4Startup::new(&sources, gametype, script_map);
     let roots: Vec<&str> = startup.roots.iter().map(String::as_str).collect();
     let scripts = sim::script::Program::load(&sources, &roots, &sim::script::Catalog::iw4())
         .map_err(|e| script_refusal(zone, gametype, "compile", &e))?;
@@ -1112,7 +1118,7 @@ fn preflight_match_install(
     {
         script_dvars.push(("onlinegame".into(), "1".into()));
     }
-    script_dvars.push(("mapname".into(), zone.to_owned()));
+    script_dvars.push(("mapname".into(), script_map.to_owned()));
     script_dvars.push(("g_gametype".into(), gametype.to_owned()));
     script_dvars.push(("sv_maxclients".into(), "18".into()));
     for (name, value) in rules.map_or(&[][..], |rules| &rules.0) {
@@ -1122,6 +1128,16 @@ fn preflight_match_install(
         {
             Some((_, set)) => set.clone_from(value),
             None => script_dvars.push((name.clone(), value.clone())),
+        }
+    }
+    // A Minecraft world has no time or score limit.
+    if assets::minecraft_map::is_minecraft_load(zone) {
+        for limit in ["timelimit", "scorelimit"] {
+            let name = format!("scr_{gametype}_{limit}");
+            match script_dvars.iter_mut().find(|(set, _)| set.eq_ignore_ascii_case(&name)) {
+                Some((_, set)) => *set = "0".into(),
+                None => script_dvars.push((name, "0".into())),
+            }
         }
     }
     if let Some(rules) = rules {

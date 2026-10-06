@@ -21,6 +21,7 @@ mod local_profile;
 pub use item::ITEM_USE_HOLD_MS;
 pub use local_profile::LocalPlayerProfile;
 mod mantle_xanim;
+pub mod voxel;
 pub mod match_state;
 mod missile;
 mod missile_guidance;

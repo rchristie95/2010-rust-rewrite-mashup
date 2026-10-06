@@ -6,6 +6,7 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 
 [workspace]
 resolver = "3"
+exclude = ["skate", "third_party/minecraftoss"]
 members = [
     "crates/anim_iw4",
     "crates/approved_tests",
@@ -44,6 +45,7 @@ members = [
     "crates/killcam_iw4",
     "crates/input_iw4",
     "crates/launcher",
+    "crates/minecraft_terrain",
     "crates/lighting_iw4",
     "crates/marks_iw4",
     "crates/master_protocol",

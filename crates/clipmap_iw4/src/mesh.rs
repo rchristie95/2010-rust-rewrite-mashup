@@ -27,7 +27,8 @@ pub struct ClipPartition {
     pub tri_count: u8,
     pub first_tri: i32,
 
-    pub first_vert_segment: u8,
+    // Retail zones use u8. Imported worlds may need more than 256 segments.
+    pub first_vert_segment: u16,
 
     pub border_count: u8,
     pub first_border: u32,

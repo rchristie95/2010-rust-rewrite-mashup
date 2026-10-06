@@ -31,5 +31,7 @@ impl Plugin for RenderAnimPlugin {
         crate::occupancy::item::register_item_systems(app);
         crate::occupancy::dyn_ent::register_dyn_ent_systems(app);
         crate::gaps::register_render_gaps(app);
+        crate::skate::register(app);
+        crate::minecraft_world::register(app);
     }
 }

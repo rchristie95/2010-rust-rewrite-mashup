@@ -7,6 +7,7 @@ use render_frontend::prepare::scene::world::WorldScene;
 use crate::LiveWorldIdentity;
 
 pub fn update_admission(
+    skate: Option<Res<frame::SkateMode>>,
     mut signon: ResMut<SignonState>,
     mut admission: ResMut<ClientAdmission>,
     role: Res<RuntimeRole>,
@@ -19,6 +20,7 @@ pub fn update_admission(
     generation: Res<frame::WorldGeneration>,
     navigation: Option<Res<frame::BotNavigationReady>>,
     mut policy: ResMut<crate::SessionReadinessPolicy>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
 ) {
     if let (Some(live), Some(installed)) = (live.as_mut(), admission.core.installed())
         && live.load_key.local_load_request_id == installed.local_load_request_id
@@ -31,7 +33,7 @@ pub fn update_admission(
             generation.0 == Some(live.load_key.local_load_request_id)
                 && admission.core.installed() == Some(live.load_key)
         });
-    let decision = crate::readiness::decide_readiness(
+    let mut decision = crate::readiness::decide_readiness(
         *role,
         headless.is_some(),
         *generation,
@@ -40,6 +42,11 @@ pub fn update_admission(
         scene.as_ref().map(|scene| scene.readiness),
         audio.as_ref().map(|report| report.0),
     );
+    let mashup_ready = headless.is_some()
+        || ((*role != RuntimeRole::Listen || skate.is_none_or(|skate| !skate.preload_pending))
+            && minecraft.is_none_or(|ui| !ui.loading_world));
+    decision.presentation &= mashup_ready;
+    decision.advancement &= mashup_ready;
     if let Some(hold) = hold.as_mut() {
         hold.0 = !decision.advancement;
     }

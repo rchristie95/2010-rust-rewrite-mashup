@@ -426,6 +426,9 @@ fn fpv_occupy_submission(
 }
 
 pub fn occupy_fpv_scene(
+    skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
     mut submissions: MessageWriter<AnimDObjSceneSubmission>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
@@ -438,7 +441,12 @@ pub fn occupy_fpv_scene(
 ) {
     let (view, settings) = view_settings;
     let fpv_meshes = owners.meshes.as_ref();
-    if presented.viewweapon_player(local.0).is_none()
+    if (skate.active && !skate.bones.is_empty())
+        || puppet.as_ref().is_some_and(|p| p.active)
+        || minecraft
+            .as_ref()
+            .is_some_and(|ui| ui.active && ui.holding_item && !ui.empty_hand)
+        || presented.viewweapon_player(local.0).is_none()
         || presented_is_third_person(
             &presented,
             local.0,
@@ -856,6 +864,7 @@ fn skin_fpv_geometry(
     mut fpv_plan: ResMut<crate::FpvDrawPlan>,
     mut status: ResMut<FpvStatusGap>,
     gaps: Res<RenderPresentationGaps>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
     mut lenses: Query<
         &mut Transform,
         (
@@ -894,7 +903,13 @@ fn skin_fpv_geometry(
                 crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
                 return;
             }
-            if fpv_plan.rig_generation != rig.generation() || fpv_plan.camo != product.camo {
+            let hands_only = minecraft
+                .as_ref()
+                .is_some_and(|ui| ui.active && ui.empty_hand);
+            if fpv_plan.rig_generation != rig.generation()
+                || fpv_plan.camo != product.camo
+                || fpv_plan.hands_only != hands_only
+            {
                 let camo = session.and_then(|session| session.view.camo(product.camo));
                 crate::install_prepared_fpv_plan(
                     &mut fpv_plan,
@@ -902,6 +917,10 @@ fn skin_fpv_geometry(
                     camo.map(|swaps| &**swaps),
                     handle,
                 );
+                if hands_only {
+                    fpv_plan.draws.retain(|draw| draw.hands);
+                }
+                fpv_plan.hands_only = hands_only;
                 fpv_plan.rig_generation = rig.generation();
                 fpv_plan.camo = product.camo;
             }
@@ -1017,6 +1036,7 @@ pub fn apply_fpv_placement(
     >,
     view_settings: (Res<ViewSubject>, Res<frame::GameSettings>),
     mut gfx_scene: ResMut<HostGfxScene>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
 ) {
     let (view, settings) = view_settings;
     *aim = ViewweaponAim::default();
@@ -1213,6 +1233,32 @@ pub fn apply_fpv_placement(
         );
     }
     *transform = placed;
+    if let Some(ui) = minecraft.as_ref().filter(|ui| ui.active && ui.empty_hand) {
+        minecraft_hand_placement(&mut transform, ui.hand_swing);
+    }
+}
+
+/// The bare hands where Minecraft holds its arm: lower and further right
+/// than a gun, jabbing forward and down through a swing as
+/// `ItemInHandRenderer.renderPlayerArm` moves the arm.
+fn minecraft_hand_placement(transform: &mut Transform, swing: f32) {
+    use std::f32::consts::PI;
+    // Inches in camera space: right, up, back.
+    const REST: Vec3 = Vec3::new(2.5, -2.0, 1.0);
+    // Inches to one of Minecraft's arm units.
+    const ARM: f32 = 14.0;
+    let root = swing.sqrt();
+    let across = -0.3 * (root * PI).sin();
+    let lift = 0.4 * (root * 2.0 * PI).sin();
+    let thrust = -0.4 * (swing * PI).sin();
+    let jab = Vec3::new(across, lift, thrust) * ARM;
+    let turn = (root * PI).sin();
+    let roll = (swing * swing * PI).sin();
+    let rotation = Quat::from_rotation_y(turn * 12f32.to_radians())
+        * Quat::from_rotation_x(-turn * 18f32.to_radians())
+        * Quat::from_rotation_z(-roll * 10f32.to_radians());
+    transform.translation = rotation * (transform.translation + REST) + jab;
+    transform.rotation = rotation * transform.rotation;
 }
 
 fn fpv_spawn_queued(pending: Res<PendingFpvSpawn>) -> bool {

@@ -412,6 +412,7 @@ pub(super) async fn walk_prepared_match(
             shader_refs.n, shader_refs.real, shader_refs.reference,
             decl_refs.n, decl_refs.real, decl_refs.reference,
         ));
+    crate::bot_model::install_local_bot_materials(&mut global);
     let (mut global, finalized_ids) = global.publish();
     let map_ids = provisional_map_ids
         .into_iter()

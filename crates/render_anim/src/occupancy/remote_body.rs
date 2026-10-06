@@ -45,6 +45,7 @@ use std::sync::Arc;
 #[derive(Component, Debug, Clone, Copy)]
 #[require(RemoteFxBolts)]
 pub struct RemotePlayer {
+    pub is_bot: bool,
     pub ffa_team: Option<u8>,
 
     pub client_state_team: i32,
@@ -90,6 +91,7 @@ pub fn register_remote_body_systems(app: &mut App) {
             Update,
             sync_remote_bodies
                 .after(PresentedPublished)
+                .after(crate::minecraft_world::place_inventory_puppet)
                 .before(occupy_remote_scene_ents)
                 .in_set(render_scene::GfxSceneAdd),
         )
@@ -203,6 +205,8 @@ fn finish_body_draw_plan(mut plan: ResMut<RemoteBodyDrawPlan>) {
 fn begin_remote_body_tess() {}
 
 fn occupy_remote_scene_ents(
+    skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
@@ -255,12 +259,14 @@ fn occupy_remote_scene_ents(
             .player(local.0)
             .map(|ps| ps.other_flags)
             .unwrap_or(0),
-        rendering_third_person: crate::occupancy::third_person::presented_is_third_person(
-            &presented,
-            local.0,
-            in_killcam,
-            settings.third_person,
-        ),
+        rendering_third_person: (skate.active && !skate.bones.is_empty())
+            || puppet.as_ref().is_some_and(|p| p.active)
+            || crate::occupancy::third_person::presented_is_third_person(
+                &presented,
+                local.0,
+                in_killcam,
+                settings.third_person,
+            ),
     };
     for (identity, runtime, transform) in &remotes {
         if !remote_body_submits(identity.number(), runtime, gate) {
@@ -349,6 +355,8 @@ fn occupy_remote_scene_ents(
 }
 
 fn sync_remote_bodies(
+    skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
     mut commands: Commands,
     local: Res<LocalPresentClient>,
     presented: Res<PresentedSnapshot>,
@@ -379,12 +387,14 @@ fn sync_remote_bodies(
             .player(local.0)
             .map(|ps| ps.other_flags)
             .unwrap_or(0),
-        rendering_third_person: crate::occupancy::third_person::presented_is_third_person(
-            &presented,
-            local.0,
-            in_killcam,
-            settings.third_person,
-        ),
+        rendering_third_person: (skate.active && !skate.bones.is_empty())
+            || puppet.as_ref().is_some_and(|p| p.active)
+            || crate::occupancy::third_person::presented_is_third_person(
+                &presented,
+                local.0,
+                in_killcam,
+                settings.third_person,
+            ),
     };
 
     for (entity, identity, runtime, remote) in &existing {
@@ -439,12 +449,25 @@ fn sync_remote_bodies(
 
         let origin = runtime.origin;
         let yaw = runtime.angles[1];
-        let pose = Transform {
+        let mut pose = Transform {
             translation: Vec3::from_array(origin),
             rotation: Quat::from_rotation_z(yaw.to_radians()),
             scale: Vec3::ONE,
         };
+        // A corpse belongs to its client too; only the living body rides.
+        let is_corpse = runtime.next_state.e_type == ET_PLAYER_CORPSE
+            || runtime.pose_e_type == ET_PLAYER_CORPSE as u8;
+        if skate.active && !skate.bones.is_empty() && client.0 == skate.client && !is_corpse {
+            pose = Transform::from_matrix(skate.root);
+        }
+        if let Some(puppet) = puppet.as_ref().filter(|p| p.active && client.0 == p.client) {
+            pose = Transform::from_matrix(puppet.root);
+        }
         let marker = RemotePlayer {
+            is_bot: meta.is_some_and(|m| {
+                m.name == entity_iw4::pack_client_state_name("bot")
+                    || m.name == entity_iw4::pack_client_state_name("dummy")
+            }),
             ffa_team,
             client_state_team,
             shield: meta.and_then(|meta| meta.shield),
@@ -458,6 +481,8 @@ fn sync_remote_bodies(
 }
 
 struct PendingBodySkin<'a> {
+    skate: Option<&'a frame::SkateMode>,
+    is_bot: bool,
     persist_key: u32,
     transform: Transform,
     matrices: Vec<Mat4>,
@@ -485,6 +510,8 @@ enum RemoteSkinAction<'a> {
 
 struct RemotePoseFrame<'a> {
     sources: &'a asset_anim::PlayerAnimSources,
+    skate: &'a frame::SkateMode,
+    puppet: Option<&'a frame::InventoryPuppet>,
     tree: &'a asset_anim::CompiledAnimTreeDefinition,
     catalog: &'a assets::PreparedXAnims,
     bodies: &'a PreparedBodies,
@@ -533,6 +560,8 @@ fn remote_body_scene_slot(
 }
 
 fn pose_remote_bodies(
+    skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
     time: Res<Time>,
     gaps: Res<RenderPresentationGaps>,
     sources: Option<Res<asset_anim::PlayerAnimSources>>,
@@ -656,6 +685,8 @@ fn pose_remote_bodies(
     let last_cache_hits = pose_hashes.take_last_cache_hits();
     let mut pose_frame = RemotePoseFrame {
         sources,
+        skate: &skate,
+        puppet: puppet.as_deref(),
         tree,
         catalog: xanims,
         bodies,
@@ -801,7 +832,10 @@ impl<'a> RemotePoseFrame<'a> {
         let world_weapons = self.world_weapons;
         let kits = self.kits;
         let weapon = sample.weapon;
-        let view_pitch_deg = sample.view_pitch_deg;
+        let view_pitch_deg = match self.puppet {
+            Some(puppet) if puppet.active && persist_key == puppet.client => puppet.pitch,
+            _ => sample.view_pitch_deg,
+        };
         let prone = sample.prone;
         let crouch = sample.crouch;
         let dt = self.dt;
@@ -894,11 +928,20 @@ impl<'a> RemotePoseFrame<'a> {
                 .expect("composed");
             validate_remote_tracks(dobj, clips.as_ref(), body, &model_set.body_name)?;
 
-            let world = pose_remote_dobj(
-                dobj,
-                anim_runtime,
-                remote_player_controller(is_corpse, view_pitch_deg, prone, crouch),
-            )?;
+            // A corpse keeps its client's key; only the living body skates.
+            let skating = self.skate.active
+                && !self.skate.bones.is_empty()
+                && persist_key == self.skate.client
+                && !is_corpse;
+            let world = if skating {
+                crate::skate::rig::pose(dobj, self.skate)
+            } else {
+                pose_remote_dobj(
+                    dobj,
+                    anim_runtime,
+                    remote_player_controller(is_corpse, view_pitch_deg, prone, crouch),
+                )?
+            };
             let skin = publish_remote_dobj(
                 dobj,
                 kit.bolt_bones,
@@ -945,6 +988,12 @@ impl<'a> RemotePoseFrame<'a> {
                             .iter()
                             .find(|camo| camo.slot == sample.weapon_model)
                     });
+                    job.is_bot = remote.is_bot;
+                    if skating {
+                        job.skate = Some(self.skate);
+                        job.gun = None;
+                        job.attachments.clear();
+                    }
                     job.dest = take_unique_geom(pose_hashes, persist_key);
                     pending.push(job);
                 }
@@ -974,6 +1023,8 @@ fn remote_skin_action<'a>(
         SkinAfterPose::Culled => RemoteSkinAction::Culled,
         SkinAfterPose::ReuseCache => RemoteSkinAction::ReuseCache,
         SkinAfterPose::Blend => RemoteSkinAction::Blend(PendingBodySkin {
+            skate: None,
+            is_bot: false,
             persist_key,
             transform: *transform,
             matrices,
@@ -1207,33 +1258,37 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
     let transform = job.transform;
     let lods = (Some(job.body_lod), job.head_lod, job.gun_lod);
     let mut geom = job.dest;
-    skin_slot_into(
-        &job.body.skel,
-        &job.matrices,
-        0,
-        job.body_lod,
-        0,
-        job.skin_entries,
-        &job.body.material_keys,
-        &job.body.material_edges,
-        &mut geom,
-        false,
-    )?;
-    match (job.head, job.head_lod) {
-        (None, _) | (Some(_), None) => {}
-        (Some((head, base)), Some(lod)) => {
-            skin_slot_into(
-                &head.skel,
-                &job.matrices,
-                base,
-                lod,
-                job.head_model.unwrap_or(1),
-                job.skin_entries,
-                &head.material_keys,
-                &head.material_edges,
-                &mut geom,
-                false,
-            )?;
+    if let Some(model) = assets::bot_model::local_bot_model().filter(|_| job.is_bot) {
+        super::bot_model::skin(model, &job.body.skel, &job.matrices, &mut geom)?;
+    } else {
+        skin_slot_into(
+            &job.body.skel,
+            &job.matrices,
+            0,
+            job.body_lod,
+            0,
+            job.skin_entries,
+            &job.body.material_keys,
+            &job.body.material_edges,
+            &mut geom,
+            false,
+        )?;
+        match (job.head, job.head_lod) {
+            (None, _) | (Some(_), None) => {}
+            (Some((head, base)), Some(lod)) => {
+                skin_slot_into(
+                    &head.skel,
+                    &job.matrices,
+                    base,
+                    lod,
+                    job.head_model.unwrap_or(1),
+                    job.skin_entries,
+                    &head.material_keys,
+                    &head.material_edges,
+                    &mut geom,
+                    false,
+                )?;
+            }
         }
     }
     let gun_first = geom.surfaces.len();
@@ -1282,6 +1337,9 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
             }
         }
     }
+    if let Some(skate) = job.skate {
+        crate::skate::rig::board(skate, &mut geom)?;
+    }
     let (radii, radius_parents) = radii(
         job.body,
         job.head.map(|(head, _)| head),
@@ -1309,13 +1367,47 @@ fn enqueue_remote_body_lighting(
     }
     for item in submit.iter() {
         let box_half = lighting_box_half(&item.radii, &item.radius_parents);
-        let lookup_fallback = atpoint.fallback(item.origin, box_half);
+        // Player origins are at their feet. Sample the posed model's centre
+        // so the light-grid lookup is above the ground and follows stance.
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for vertex in &item.geom.packed {
+            let p = Vec3::new(
+                f32::from_le_bytes(vertex[0..4].try_into().unwrap()),
+                f32::from_le_bytes(vertex[4..8].try_into().unwrap()),
+                f32::from_le_bytes(vertex[8..12].try_into().unwrap()),
+            );
+            min = min.min(p);
+            max = max.max(p);
+        }
+        let origin = if min.is_finite() && max.is_finite() {
+            item.world_from_local
+                .transform_point3((min + max) * 0.5)
+                .to_array()
+        } else {
+            item.origin
+        };
+        let lookup_fallback = atpoint.fallback(origin, box_half);
         let client = u16::try_from(item.client).unwrap_or(u16::MAX);
+        let owner = if assets::bot_model::local_bot_model().is_some_and(|model| {
+            item.geom.surfaces.iter().any(|surface| {
+                model.surfaces.iter().any(|custom| {
+                    surface.material.as_ref().is_some_and(|key| {
+                        key.namespace == asset_core::AssetNamespace::Iw4
+                            && key.name == custom.material
+                    })
+                })
+            })
+        }) {
+            ModelLightingOwner::LocalBotOverride(client)
+        } else {
+            ModelLightingOwner::RemoteClient(client)
+        };
         binds.by_client.insert(
             item.client,
             lighting_requests.request(ModelLightingRequest {
-                owner: ModelLightingOwner::RemoteClient(client),
-                origin: item.origin,
+                owner,
+                origin,
                 lookup_fallback,
             }),
         );

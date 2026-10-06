@@ -17,9 +17,11 @@ pub fn reverse_z_viewport_depth(depth_range_type: i32) -> (f32, f32) {
 
 pub fn depth_range_type_for_draw(kind: &RetainedDrawKind, key: u64) -> i32 {
     match kind {
-        RetainedDrawKind::XModel { .. } => {
+        RetainedDrawKind::XModel { scene_entnum, .. } => {
             let object_id = dpvs_iw4::GfxDrawSurf { packed: key }.object_id();
-            if host_viewmodel_render_fx_flags(object_id) & RENDER_FX_DEPTH_HACK != 0 {
+            if host_viewmodel_render_fx_flags(object_id) & RENDER_FX_DEPTH_HACK != 0
+                || render_frame::depth_hack_scene_entnum(*scene_entnum)
+            {
                 GFX_DEPTH_RANGE_VIEWMODEL
             } else {
                 GFX_DEPTH_RANGE_SCENE

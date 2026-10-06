@@ -800,6 +800,10 @@ fn use_reload_as_reload(
 }
 
 pub fn sample_client_input(
+    (skate, mut minecraft): (
+        Option<Res<frame::SkateMode>>,
+        Option<ResMut<frame::MinecraftUi>>,
+    ),
     time: Res<Time<Real>>,
     mut actions: ResMut<ClientActionInput>,
     mut look: ResMut<LookState>,
@@ -814,8 +818,10 @@ pub fn sample_client_input(
     mut action_inbox: Option<ResMut<ClientActionInbox>>,
     mut request_ids: Option<ResMut<crate::ActionRequestIds>>,
     view: Option<Res<frame::ViewSubject>>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
-    aim_cursor: (ResMut<LocationCursor>, Res<crate::ViewweaponAim>),
+    (trace, aim_cursor): (
+        Option<ResMut<ClientPhaseTrace>>,
+        (ResMut<LocationCursor>, Res<crate::ViewweaponAim>),
+    ),
 ) {
     let (mut cursor, aim) = aim_cursor;
     push_phase(trace, "Input");
@@ -903,6 +909,25 @@ pub fn sample_client_input(
                     maxs: [o[0] + RADIUS, o[1] + RADIUS, o[2] + top],
                     aim: [o[0], o[1], o[2] + top * 0.75],
                     velocity: other.velocity,
+                });
+            }
+            for (key, mins, maxs) in sim::voxel::mob_targets() {
+                // The upper body, as for players.
+                let aim = [
+                    (mins[0] + maxs[0]) * 0.5,
+                    (mins[1] + maxs[1]) * 0.5,
+                    mins[2] + (maxs[2] - mins[2]) * 0.75,
+                ];
+                let radius = (maxs[0] - mins[0]).max(maxs[1] - mins[1]) * 0.5;
+                if !in_front(aim, radius) || !visible(aim) {
+                    continue;
+                }
+                targets.push(crate::client::pad_aim::AimTarget {
+                    key: 1 << 40 | key,
+                    mins,
+                    maxs,
+                    aim,
+                    velocity: [0.0; 3],
                 });
             }
         }
@@ -1034,6 +1059,42 @@ pub fn sample_client_input(
             };
         }
     }
+    // On a Minecraft map the hotbar picks the gun: MW2's weapon cycling and
+    // action slots give way to the gun its selection asks for.
+    let hotbar = minecraft.as_ref().is_some_and(|ui| ui.active);
+    if hotbar {
+        // Switching weapon swaps between the first two hotbar slots; action
+        // slots 3 and 4 (the D-pad's left and right) step along it.
+        let slots = std::mem::take(&mut actions.client.action_slots);
+        let cycles = std::mem::take(&mut actions.client.weapon_cycles);
+        if let Some(ui) = minecraft.as_mut() {
+            let mut selected = ui.select.unwrap_or(ui.selected);
+            if !cycles.is_empty() {
+                selected = if selected == 0 { 1 } else { 0 };
+            }
+            for slot in slots {
+                match slot {
+                    2 => selected = (selected + 8) % 9,
+                    3 => selected = (selected + 1) % 9,
+                    _ => {}
+                }
+            }
+            if selected != ui.selected {
+                ui.select = Some(selected);
+            }
+        }
+        if let (Some(ps), Some(ui)) = (ps.filter(|_| !frozen), minecraft.as_mut())
+            && let Some(target) = ui.weapon_request
+            && target != select.index
+            && ps.weapons.contains(&(target as i32))
+            && input_iw4::weapon_select::weapon_cycle_allowed(ps, clock.time(), select.time, 0, 0)
+        {
+            select.index = target;
+            select.mapped_index = target;
+            select.time = clock.time();
+            input_iw4::set_ads(&mut actions.client, false);
+        }
+    }
     let slots = std::mem::take(&mut actions.client.action_slots);
     if let (Some(inbox), Some(ids)) = (action_inbox.as_mut(), request_ids.as_mut()) {
         for &slot in &slots {
@@ -1114,6 +1175,12 @@ pub fn sample_client_input(
         ps.is_some_and(|ps| ps.ground_entity_num == playerstate_iw4::ENTITYNUM_NONE);
     let mut cmd = build_usercmd(&mut actions, &look, 0);
     use_reload_as_reload(&mut actions, &mut cmd, ps);
+    if minecraft
+        .as_ref()
+        .is_some_and(|ui| ui.active && ui.holding_item)
+    {
+        cmd.buttons &= !(playerstate_iw4::buttons::ATTACK | playerstate_iw4::buttons::ADS);
+    }
     look.angles = cmd.angles;
     if !frozen
         && aim.live
@@ -1168,6 +1235,11 @@ pub fn sample_client_input(
     {
         cmd.melee_charge_yaw = yaw;
         cmd.melee_charge_dist = dist;
+    }
+    if skate.as_ref().is_some_and(|s| s.active) {
+        cmd.forwardmove = 0;
+        cmd.rightmove = 0;
+        cmd.buttons = 0;
     }
     template.cmd = cmd;
     template.ready = true;

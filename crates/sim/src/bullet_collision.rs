@@ -2311,7 +2311,10 @@ fn trace_world(
         mask,
         glass_is_solid,
     );
-    if hit.fraction != 0.0 && !mesh.static_models.is_empty() {
+    if hit.fraction != 0.0
+        && !mesh.static_models.is_empty()
+        && !crate::voxel::active_for(brushes)
+    {
         GRID_SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             let q = mesh.smodel_grid.query(

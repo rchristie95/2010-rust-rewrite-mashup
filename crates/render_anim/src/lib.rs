@@ -38,3 +38,12 @@ pub use occupancy::{
     stamp_fpv_placement_matrix, sync_camera_from_presented, tick_fpv_viewmodel,
 };
 pub use plugin::RenderAnimPlugin;
+
+mod minecraft_entities;
+mod minecraft_hand;
+mod minecraft_inventory;
+mod minecraft_mining;
+mod minecraft_minimap;
+mod minecraft_sounds;
+pub mod minecraft_world;
+pub mod skate;

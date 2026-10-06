@@ -144,6 +144,68 @@ fn set_ammo_on_ps(
     }
 }
 
+/// Guns every player on a Minecraft map carries besides its class.
+const BLOCK_WORLD_GUNS: [&str; 3] = ["cheytac_mp", "spas12_mp", "ump45_mp"];
+
+/// On a Minecraft map every player also carries the Intervention, SPAS-12
+/// and UMP45, and never runs out: each weapon's clips stay full and its
+/// reserve (grenades too) at the most it holds, as MW2's
+/// `player_sustainAmmo` keeps them.
+pub(crate) fn sustain_block_world_arsenal(world: &mut FrameWorld) {
+    if !crate::voxel::active() || !world.publishes_snapshot() {
+        return;
+    }
+    let names = world.weapon_script_names();
+    let extra: Vec<u32> = BLOCK_WORLD_GUNS
+        .iter()
+        .filter_map(|name| names.iter().position(|n| n == name))
+        .filter_map(|i| u32::try_from(i).ok())
+        .collect();
+    for id in world.client_ids_sorted() {
+        if !world.client_meta(id).is_some_and(|m| m.lifecycle == ClientLifecycle::Alive) {
+            continue;
+        }
+        let Some(mut ps) = world.player(id).copied() else {
+            continue;
+        };
+        let before = ps;
+        for &weapon in &extra {
+            if !ps.weapons.contains(&(weapon as i32)) {
+                give_weapon_to_ps_akimbo(&mut ps, weapon, false);
+            }
+        }
+        for weapon in ps.weapons {
+            let Ok(weapon) = u32::try_from(weapon) else {
+                continue;
+            };
+            if weapon == 0 {
+                continue;
+            }
+            let Some(facts) = world.combat_facts_for(weapon) else {
+                continue;
+            };
+            let (clip_r, clip_l, stock) = ammo_from_ps(world, &ps, weapon);
+            let full_stock = facts.max_ammo.max(facts.start_ammo);
+            let full_l = if clip_l > 0 { facts.clip_size } else { 0 };
+            if clip_r < facts.clip_size || clip_l < full_l || stock < full_stock {
+                set_ammo_on_ps(world, &mut ps, weapon, facts.clip_size, full_l, full_stock);
+            }
+            // The match's own ledger, which grenades are thrown from.
+            let meta = world.client_meta_mut(id);
+            let (clip, stock) = meta.ammo_for(weapon);
+            if clip < facts.clip_size || stock < full_stock {
+                meta.set_ammo(weapon, facts.clip_size, full_stock);
+            }
+        }
+        world.client_meta_mut(id).mirror_held_ammo(ps.weapon);
+        if ps != before
+            && let Some(slot) = world.player_mut(id)
+        {
+            *slot = ps;
+        }
+    }
+}
+
 fn add_ammo_on_ps(
     world: &FrameWorld,
     ps: &mut PlayerState,

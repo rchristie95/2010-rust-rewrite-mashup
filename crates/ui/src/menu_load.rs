@@ -3,9 +3,9 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 use frame::ClientSet;
 
 use asset_game::{LocalizeCatalog, load_mp_localized_strings};
-use asset_transport::{
-    GamesRoot, LoadProgress, find_runtime_common_mp, find_zone_file, list_mp_map_packs,
-};
+use asset_transport::{GamesRoot, LoadProgress, find_runtime_common_mp};
+// The Minecraft world is found and listed as a map of its own.
+use assets::{find_zone_file, list_mp_map_packs};
 use assets::{LoadingPreviewSource, MatchLoadRequest};
 
 use crate::classes::select::ClassSelectOverlayOpen;

@@ -122,6 +122,7 @@ impl Plugin for HudPlugin {
                             update_hud_elems,
                             update_targetmap,
                             crate::menus::update_script_menus,
+                            crate::minecraft_inventory::update_minecraft_hud,
                             hud_stage_close::<7>,
                         )
                             .chain(),
@@ -148,6 +149,7 @@ impl Plugin for HudPlugin {
                     flush_use_hint_tess,
                     flush_hud_elems_tess,
                     flush_targetmap_tess,
+                    flush_minecraft_tess,
                     flush_blood_tess,
                     flush_script_menus_tess,
                 )
@@ -344,6 +346,7 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
             spawn_hud_elems(root);
             spawn_targetmap(root);
             crate::menus::spawn_script_menus(root);
+            crate::font_overlay::spawn_overlay(root, crate::minecraft_inventory::MinecraftRaster);
         });
 }
 
@@ -628,6 +631,36 @@ fn flush_playercard_tess(
         gpu_list::apply_tess_job(
             job,
             &mut host,
+            &mut latch,
+            &mut hud_images,
+            &mut images,
+            &mut frame,
+            surface.width(),
+            surface.height(),
+        );
+    }
+}
+
+fn flush_minecraft_tess(
+    surface: Res<crate::surface::Hud2dSurface>,
+    mut pass: ResMut<HudTessPass>,
+    mut hud_images: ResMut<HudImages>,
+    mut images: ResMut<Assets<Image>>,
+    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
+    mut host: Query<
+        (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
+        With<crate::minecraft_inventory::MinecraftRaster>,
+    >,
+) {
+    let _body = gpu_list::TessBody::open();
+    if !surface.is_ready() {
+        return;
+    }
+    let job = std::mem::take(&mut pass.minecraft);
+    if let Ok((_, mut node, mut latch)) = host.single_mut() {
+        gpu_list::apply_tess_job(
+            job,
+            &mut node,
             &mut latch,
             &mut hud_images,
             &mut images,

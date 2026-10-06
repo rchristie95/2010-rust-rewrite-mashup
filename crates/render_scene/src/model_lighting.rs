@@ -6,6 +6,9 @@ use bevy::prelude::*;
 pub enum ModelLightingOwner {
     Eye,
     RemoteClient(u16),
+    /// A remote player drawn with the local character import (CJ), which
+    /// tunes its own ambient response.
+    LocalBotOverride(u16),
     Corpse(Entity),
     ScriptModel(Entity),
 

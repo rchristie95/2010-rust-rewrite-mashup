@@ -193,11 +193,14 @@ impl WorldModelLightingCache {
                 self.body_handles.remove(&key);
                 return 0;
             };
-            match asset_model::sample_light_grid_with_lookup_fallback(
-                &grid.view(),
-                origin,
-                lookup_fallback,
-            ) {
+            // The Minecraft world is lit by its own lightmap, applied on top;
+            // the grid of the map it stands in for says nothing about it.
+            let sampled = if sim::voxel::active() {
+                asset_model::neutral_light_grid_sample(&grid.view())
+            } else {
+                asset_model::sample_light_grid_with_lookup_fallback(&grid.view(), origin, lookup_fallback)
+            };
+            match sampled {
                 Ok(sampled) => {
                     if key == ModelLightingOwner::Eye {
                         self.eye_atpoint_path = Some(format!("{:?}", sampled.path));
@@ -221,13 +224,30 @@ impl WorldModelLightingCache {
                             );
                         }
                     }
-                    // Untracked: only `tile_writes` carries the tile to the GPU.
+                    // Untracked: a tracked write re-extracts and re-creates the
+                    // whole atlas texture. The tile goes to the GPU on its own
+                    // through `tile_writes`.
                     if let (Some(entry), Some(img)) = (
                         ModelLightingTileIndex::from_handle(handle),
                         images.get_mut_untracked(&atlas.image),
-                    ) && model_lighting_atlas_write_tile(img, dims, entry, &sampled.tile)
-                    {
-                        tile_writes.push(atlas.image.id(), entry, &sampled.tile);
+                    ) {
+                        let mut tile = sampled.tile;
+                        // The local character import can tune its own ambient response.
+                        // Its allocation is separate from Eye, map objects and stock players.
+                        if matches!(key, ModelLightingOwner::LocalBotOverride(_)) {
+                            let gain = assets::bot_model::local_bot_model()
+                                .map_or(1.0, |model| model.lighting_gain);
+                            for texel in tile.chunks_exact_mut(4) {
+                                for channel in &mut texel[..3] {
+                                    *channel =
+                                        (f32::from(*channel) * gain).round().clamp(0.0, 255.0)
+                                            as u8;
+                                }
+                            }
+                        }
+                        if model_lighting_atlas_write_tile(img, dims, entry, &tile) {
+                            tile_writes.push(atlas.image.id(), entry, &tile);
+                        }
                     }
                     self.lighting_info[slot as usize] = lighting_iw4::lighting_info_from_bytes(
                         sampled.picked_primary,

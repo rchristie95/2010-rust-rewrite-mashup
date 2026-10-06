@@ -18,6 +18,7 @@ pub(crate) fn update_script_ambient(
     ready: Res<crate::AudioReady>,
     generation: Res<frame::WorldGeneration>,
     loading: Option<Res<assets::LoadingScreen>>,
+    identity: Option<Res<frame::LaunchIdentity>>,
     presented: Option<Res<net::PresentedSnapshot>>,
     clock: Option<Res<net::FrameClock>>,
     local: Res<net::LocalPresentClient>,
@@ -34,6 +35,12 @@ pub(crate) fn update_script_ambient(
         playback.voices.clear();
     }
     playback.voices.retain(CueHandle::active);
+    if identity.is_some_and(|identity| assets::minecraft_map::is_minecraft_load(&identity.zone)) {
+        for voice in playback.voices.drain(..) {
+            voice.release(runtime.audio_frame(), 0);
+        }
+        return;
+    }
     if !ready.0.ready_for(*generation) || loading.is_some_and(|screen| !screen.is_complete()) {
         return;
     }

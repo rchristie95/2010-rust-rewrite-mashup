@@ -36,3 +36,8 @@ pub use ui::{
     HostMatchRules, UiBindRequest, UiBindingCapture, UiExecCommand, UiMenuDvars, UiMenuKey,
     UiMenuRequest, UiPartyState, UiPlayMusic, UiPlaySound, UiStopMusic, register_ui_contracts,
 };
+
+pub mod skate;
+pub use skate::SkateMode;
+pub mod minecraft_ui;
+pub use minecraft_ui::{InventoryPuppet, McClick, McSlot, McStack, MinecraftUi};

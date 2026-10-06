@@ -7,7 +7,11 @@ use std::collections::BTreeMap;
 #[derive(Resource, Clone, Debug, Default)]
 pub struct BindingView {
     pub chords: BTreeMap<u32, String>,
+    /// The controller buttons bound to each command.
+    pub pad_chords: BTreeMap<u32, String>,
     pub listening: Option<u32>,
+    /// The binding being listened for is the controller's.
+    pub listening_pad: bool,
     pub revision: u64,
 }
 
@@ -17,6 +21,13 @@ impl BindingView {
             .get(&command_id)
             .map(String::as_str)
             .unwrap_or("UNBOUND")
+    }
+
+    pub fn pad_chord(&self, command_id: u32) -> &str {
+        self.pad_chords
+            .get(&command_id)
+            .map(String::as_str)
+            .unwrap_or("-")
     }
 }
 

@@ -38,6 +38,7 @@ pub(super) fn draw_exact_colour(
             mut working_set,
             mut texture_table,
             mut shadow_table,
+            minecraft,
         ),
     ): (
         Res<bevy::render::renderer::RenderAdapter>,
@@ -56,6 +57,7 @@ pub(super) fn draw_exact_colour(
             ResMut<crate::ColourWorkingSet>,
             ResMut<SceneTextureTables>,
             ResMut<ShadowTextureTable>,
+            Res<super::super::minecraft_light::MinecraftLightGpu>,
         ),
     ),
     mut context: RenderContext,
@@ -173,6 +175,7 @@ pub(super) fn draw_exact_colour(
         shadow_skinned_vertex,
         shadow_skinned_vertex_lighting,
         shadow_skinned_index,
+        minecraft.off(),
     );
     let spot_submit = record_shadowmap_spot(
         spot_prepared,
@@ -186,6 +189,7 @@ pub(super) fn draw_exact_colour(
         shadow_skinned_vertex,
         shadow_skinned_vertex_lighting,
         shadow_skinned_index,
+        minecraft.off(),
     );
     let mut record_n = sun_submit.record_n;
     record_n.add(spot_submit.record_n);
@@ -426,12 +430,15 @@ pub(super) fn draw_exact_colour(
             &registry,
             &constant_arena,
             [table_binds[0], table_binds[1]],
-            prepared.iter().filter(|draw| !draw.after_scene_resolve),
+            prepared
+                .iter()
+                .filter(|draw| !draw.after_scene_resolve && !draw.minecraft_hidden),
             "iw4_exact_colour_pass",
             &mut refused_draws,
             &mut last_refusal,
             &mut encode_not_ready,
             focused_object_id,
+            minecraft.camera(),
         );
         gpu_indexed = gpu_indexed.saturating_add(indexed);
         focused_drawn_passes = focused_drawn_passes.saturating_add(focused_drawn);
@@ -478,12 +485,15 @@ pub(super) fn draw_exact_colour(
                         &registry,
                         &constant_arena,
                         [table_binds[2], table_binds[3]],
-                        prepared.iter().filter(|draw| draw.after_scene_resolve),
+                        prepared
+                            .iter()
+                            .filter(|draw| draw.after_scene_resolve && !draw.minecraft_hidden),
                         "iw4_exact_emissive_pass",
                         &mut refused_draws,
                         &mut last_refusal,
                         &mut encode_not_ready,
                         focused_object_id,
+                        minecraft.camera(),
                     );
                 gpu_span.end(encoder);
                 gpu_indexed = gpu_indexed.saturating_add(indexed);

@@ -56,6 +56,7 @@ impl Plugin for RenderPlugin {
                     crate::extract::extract_image_handles,
                     crate::extract::extract_postfx,
                     crate::extract::extract_model_lighting_tiles,
+                    crate::extract::extract_minecraft_world,
                 ),
             );
             if render_gpu::geometry_diagnostic_enabled() {

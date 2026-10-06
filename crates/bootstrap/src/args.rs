@@ -113,7 +113,7 @@ pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<Launc
         Some(other) => Err(format!(
             "unknown launch args starting with `{other}` — expected: map <zone> | serve <zone> | menu | play <demo> [--cmds '<script>'] | export-gltf <zone>"
         )),
-        None => Err(USAGE.into()),
+        None => Ok(LaunchMode::Menu),
     }
 }
 

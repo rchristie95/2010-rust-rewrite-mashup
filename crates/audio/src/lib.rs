@@ -10,6 +10,7 @@ mod entity_events;
 mod frontend;
 mod media_queue;
 mod messages;
+mod minecraft;
 mod pcm;
 mod pcm_budget;
 mod playback;
@@ -29,6 +30,7 @@ pub use clip_store::{ClipPath, ClipPathCost, ClipPrepCost, ClipStore, clip_prep_
 pub use emit::{BobCycleTracker, emit_footstep_on_bob_wrap, emit_weapon_fire};
 pub use frontend::FrontendAudio;
 pub use match_set::{AudioReady, AudioSilent};
+pub use minecraft::{McSoundQueue, McSoundRequest};
 pub use messages::{
     AliasCommand, BoundWeaponSound, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL,
     ViewmodelNotetrack, ViewmodelNotetracks, WeaponSound, ent_from_number,

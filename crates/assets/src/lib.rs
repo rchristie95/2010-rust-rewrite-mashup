@@ -1,5 +1,9 @@
 mod artifact_cache;
 mod asset_graph;
+pub mod bot_model;
+pub mod minecraft_map;
+pub mod minecraft_setup;
+pub mod skate_board;
 mod gltf_export;
 mod iwd;
 mod lane;
@@ -36,6 +40,7 @@ pub use match_load::{
     MapLoadApproval, MatchLoadAbort, MatchLoadAccepted, MatchLoadBusy, MatchLoadDispatch,
     MatchLoadRequest, PreparedMatchReady, PreparedMatchSound,
 };
+pub use minecraft_map::{find_zone_file, list_mp_map_packs, list_mp_maps};
 pub use plugin::AssetPlugin;
 pub use prepared::{
     BoundWeapons, MapFacts, MatchMaterials, MatchType10SoundHints, PreparedBodies,

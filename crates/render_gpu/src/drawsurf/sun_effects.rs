@@ -384,6 +384,9 @@ fn draw_sun_effects(
     let Some(mut gpu) = gpu else {
         return;
     };
+    if super::minecraft_world::hides_map() {
+        return;
+    }
     let Some(def) = frame.world().sun_effects else {
         return;
     };

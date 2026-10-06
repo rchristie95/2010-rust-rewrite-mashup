@@ -74,9 +74,14 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         render_app.edit_schedule(bevy::core_pipeline::Core2d, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
-        render_app.edit_schedule(bevy::render::Render, |schedule| {
-            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
-        });
+        // macOS keeps Bevy's multi-threaded executor here: it is what runs
+        // `create_surfaces` (a `NonSendMarker` system there) on the main
+        // thread, which AppKit requires once rendering is pipelined.
+        if !(cfg!(target_os = "macos") && pipelined_rendering()) {
+            render_app.edit_schedule(bevy::render::Render, |schedule| {
+                schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            });
+        }
         render_app.edit_schedule(bevy::render::ExtractSchedule, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
@@ -128,14 +133,14 @@ const PIPELINED_RENDERING_ENV: &str = "IW4L_PIPELINED_RENDERING";
 /// boundary; the bounded render channel permits one outstanding frame.
 /// Set IW4L_PIPELINED_RENDERING=0 for synchronous presentation.
 ///
-/// Off by default on macOS: AppKit only lets the main thread touch the NSView
-/// behind the Metal surface. Bevy hands `create_surfaces` back to the main
-/// thread through the multi-threaded executor, which the single-threaded
-/// `Render` schedule above bypasses, so the render thread would create it and
-/// panic in `raw-window-metal`.
+/// On macOS AppKit only lets the main thread touch the NSView behind the Metal
+/// surface. Bevy hands `create_surfaces` back to the main thread through the
+/// multi-threaded executor, so there the `Render` schedule keeps that executor
+/// (`add_runtime_plugins`); a single-threaded one would create the surface on
+/// the render thread and panic in `raw-window-metal`.
 fn pipelined_rendering() -> bool {
     match std::env::var_os(PIPELINED_RENDERING_ENV) {
-        None => !cfg!(target_os = "macos"),
+        None => true,
         Some(_) => perf::switch(PIPELINED_RENDERING_ENV),
     }
 }
@@ -152,11 +157,16 @@ const FRAME_LATENCY_ENV: &str = "IW4L_FRAME_LATENCY";
 /// asked for — never the number the driver granted, which this process cannot
 /// read back.
 ///
+/// macOS defaults to two. With one, the pipelined render thread blocks in
+/// Metal's `acquire_texture` waiting for a free drawable, and the overlap
+/// buys nothing: `mp_boneyard` on an M4 Max measured ~165 fps either way,
+/// ~225 fps with two, and no further gain with three.
+///
 /// The value is a count, not a switch: anything unparseable or zero is the
 /// default, and says so rather than silently picking an arm. Read once, so the
 /// window and the manifest cannot disagree and the complaint is made once.
 pub(crate) fn frame_latency() -> u32 {
-    const DEFAULT: u32 = 1;
+    const DEFAULT: u32 = if cfg!(target_os = "macos") { 2 } else { 1 };
     static FRAMES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *FRAMES.get_or_init(|| {
         let Some(asked) = std::env::var_os(FRAME_LATENCY_ENV) else {

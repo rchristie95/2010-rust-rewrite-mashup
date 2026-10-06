@@ -13,6 +13,28 @@ use render_fx::{HostFxSystem, PreparedFxCatalog, PreparedTracers};
 
 pub(crate) use super::world_gpu::WorldGpuReady;
 
+/// Every reflection probe as one flat grey of the probes' mean brightness,
+/// for the Minecraft map: its models reflect neither the stand-in map's
+/// scenery nor its colour.
+fn neutral_reflection_probes(probes: &mut [Option<Image>]) {
+    let (mut sum, mut count) = (0u64, 0u64);
+    for data in probes.iter().flatten().filter_map(|image| image.data.as_ref()) {
+        for texel in data.chunks_exact(4) {
+            sum += u64::from(texel[0]) + u64::from(texel[1]) + u64::from(texel[2]);
+            count += 3;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    let grey = (sum / count) as u8;
+    for data in probes.iter_mut().flatten().filter_map(|image| image.data.as_mut()) {
+        for texel in data.chunks_exact_mut(4) {
+            texel[..3].fill(grey);
+        }
+    }
+}
+
 fn hist_u8(values: impl IntoIterator<Item = u8>) -> String {
     let mut hist = std::collections::BTreeMap::<u8, usize>::new();
     let mut n = 0usize;
@@ -281,6 +303,12 @@ pub(crate) fn spawn_world(
     }
 
     if job.phase == WorldSpawnPhase::Programs && !job.compile.armed {
+        if load
+            .as_deref()
+            .is_some_and(|load| assets::minecraft_map::is_minecraft_load(&load.zone))
+        {
+            neutral_reflection_probes(&mut scene.reflection_probes);
+        }
         job.images.arm(&mut scene, progress.as_ref());
     }
     let images_finished = if job.images.unfinished() {

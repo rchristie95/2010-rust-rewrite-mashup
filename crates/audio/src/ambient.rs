@@ -171,7 +171,7 @@ pub(crate) fn start_sound_bank_compose(
             let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
             IwdOpen::Opening(pool.spawn(async move {
                 let mut trees = NamespaceTrees::discover(&games);
-                if let Ok(zone) = asset_transport::find_zone_file(&games, &opened_zone) {
+                if let Ok(zone) = assets::find_zone_file(&games, &opened_zone) {
                     trees.adopt_zone(&zone.path);
                 }
                 NamespaceSoundIwd::open(&trees)
@@ -403,6 +403,11 @@ pub(crate) fn boot_map_ambient_once(
         return;
     };
     if identity.zone.is_empty() {
+        return;
+    }
+    // A Minecraft world has no ambience of the map it stands in for.
+    if assets::minecraft_map::is_minecraft_load(&identity.zone) {
+        booted.0 = true;
         return;
     }
     let Some(namespace) = namespace.filter(|ns| ns.zone == identity.zone) else {

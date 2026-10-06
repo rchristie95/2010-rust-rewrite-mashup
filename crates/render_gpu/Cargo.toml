@@ -26,6 +26,7 @@ render_backend.workspace = true
 render_frame.workspace = true
 render_material.workspace = true
 bevy.workspace = true
+naga = { version = "29", features = ["wgsl-in"] }
 
 [lints]
 workspace = true
