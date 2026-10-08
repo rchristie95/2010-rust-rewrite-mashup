@@ -26,6 +26,10 @@ pub struct MobSound {
 /// What a hit or use did.
 #[derive(Clone, Debug, Default)]
 pub struct MobOutcome {
+    /// Damage was accepted by the mob, rather than merely intersecting its bounds.
+    pub hurt: bool,
+    /// Mobs killed by the accepted hit, including any sweeping damage.
+    pub kills: u32,
     /// The action was taken (the click goes no further).
     pub handled: bool,
     pub sounds: Vec<MobSound>,
@@ -86,6 +90,9 @@ pub fn attack(world: &mut EntityWorld, hit: MobHit, actor: &mut Actor, attack: &
         outcome.sound("entity.player.attack.nodamage", at, 1.0, "players_volume");
         return outcome;
     }
+    outcome.hurt = true;
+    outcome.kills = u32::from(result.died)
+        + result.swept.iter().filter(|(_, _, died)| *died).count() as u32;
     (outcome.drops, outcome.experience) = death_remains(world, actor.entity_loot.as_deref_mut());
     if result.sweep {
         outcome.sound("entity.player.attack.sweep", at, 1.0, "players_volume");

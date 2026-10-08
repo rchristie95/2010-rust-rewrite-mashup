@@ -25,6 +25,9 @@ pub(crate) fn copy_state(source: &World, target: &mut World) {
 }
 
 pub(crate) fn reset(world: &mut World) {
+    if let Some(mut feedback) = world.get_resource_mut::<super::super::minecraft::MobFeedback>() {
+        feedback.0.clear();
+    }
     let ids: Vec<_> = world
         .query_filtered::<Entity, bevy_ecs::query::With<Thread>>()
         .iter(world)
@@ -48,6 +51,8 @@ pub(crate) fn install(
         tables: Arc::new(level.tables),
         keys: Arc::new(level.keys),
         entries: Vec::new(),
+        schemas: level.schemas,
+        player_data_defaults: level.player_data_defaults.map(Arc::new),
     };
     install_level(world, Arc::new(program), plan)
 }
@@ -83,6 +88,13 @@ pub(crate) fn install_level(
             format!("{} unbound natives: {}", unbound.len(), unbound.join(" ")),
         ));
     }
+    world
+        .resource_mut::<crate::PersistentDataStore>()
+        .install_schemas(plan.schemas.clone())
+        .map_err(|error| Fault::at(&location, format!("persistent data schema: {error:?}")))?;
+    world
+        .resource_mut::<crate::PersistentDataStore>()
+        .install_defaults(plan.player_data_defaults.clone());
     let bound = program
         .natives
         .iter()

@@ -188,6 +188,29 @@ pub(crate) fn gameplay_binding(button: BindButton, command: u32, akimbo: bool) -
     command_id_lookup(mapped).expect("built-in controller action")
 }
 
+pub(crate) fn minecraft_binding(button: BindButton, command: u32, hotbar: bool) -> u32 {
+    if hotbar
+        && matches!(
+            button,
+            BindButton::Key(
+                KeyCode::Digit1
+                    | KeyCode::Digit2
+                    | KeyCode::Digit3
+                    | KeyCode::Digit4
+                    | KeyCode::Digit5
+                    | KeyCode::Digit6
+                    | KeyCode::Digit7
+                    | KeyCode::Digit8
+                    | KeyCode::Digit9
+            )
+        )
+    {
+        0
+    } else {
+        command
+    }
+}
+
 pub fn pad_layout(layout: usize) -> Vec<(PadButton, &'static str)> {
     use PadButton::*;
     let mut binds = vec![

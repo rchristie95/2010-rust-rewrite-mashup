@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
     let block = (px.floor() as i32, py.floor() as i32, pz.floor() as i32);
     let camera = CullCamera {
         position: glam::DVec3::new(px, py + 1.6, pz),
+        terrain_center: None,
         forward: glam::Vec3::new(0.0, 0.0, -1.0),
         fov_degrees: 70.0,
         aspect: 16.0 / 9.0,

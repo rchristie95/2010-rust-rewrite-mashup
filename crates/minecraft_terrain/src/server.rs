@@ -51,6 +51,9 @@ pub struct ServerSim {
 /// What a player's hit or use on a mob did, for the client to present.
 #[derive(Clone, Debug, Default)]
 pub struct MobResult {
+    pub request: Option<u64>,
+    pub hurt: bool,
+    pub kills: u32,
     pub sounds: Vec<crate::mob_actions::MobSound>,
     /// The acting player's inventory slots the action changed, with what
     /// they now hold.
@@ -271,7 +274,7 @@ impl ServerSim {
             .map(|(slot, (now, _))| (slot, now.clone()))
             .collect();
         self.spawn_trade_experience();
-        MobResult { sounds: outcome.sounds, slots, merchant: self.merchant_view(0) }
+        MobResult { request: None, hurt: outcome.hurt, kills: outcome.kills, sounds: outcome.sounds, slots, merchant: self.merchant_view(0) }
     }
 
     /// The player's trading screen as the client shows it.
@@ -842,7 +845,7 @@ pub enum Command {
     Summon { kind: String, position: [f64; 3], nbt: Option<minecraftoss_core::nbt::Tag>, y_rot: f32 },
     /// A player's hit (`attack`) or item use on a mob, with a copy of its
     /// inventory.
-    MobAction { hit: minecraftoss_entities::world::MobHit, attack: Option<minecraftoss_entities::world::PlayerAttack>, inventory: Box<minecraftoss_player::inventory::Inventory>, selected: usize, infinite: bool },
+    MobAction { request: Option<u64>, hit: minecraftoss_entities::world::MobHit, attack: Option<minecraftoss_entities::world::PlayerAttack>, inventory: Box<minecraftoss_player::inventory::Inventory>, selected: usize, infinite: bool },
     /// An operation on the player's trading screen.
     Merchant { op: MerchantOp, inventory: Box<minecraftoss_player::inventory::Inventory>, selected: usize, feet: [f64; 3] },
     /// One server tick, with the player's state for it.
@@ -1038,7 +1041,11 @@ impl ServerHandle {
     /// Hands a player's hit or use on a mob to the server; its result
     /// arrives in an output.
     pub fn mob_action(&mut self, hit: minecraftoss_entities::world::MobHit, attack: Option<minecraftoss_entities::world::PlayerAttack>, inventory: &minecraftoss_player::inventory::Inventory, selected: usize, infinite: bool) {
-        self.send(Command::MobAction { hit, attack, inventory: Box::new(inventory.clone()), selected, infinite });
+        self.send(Command::MobAction { request: None, hit, attack, inventory: Box::new(inventory.clone()), selected, infinite });
+    }
+
+    pub fn credited_mob_attack(&mut self, request: u64, hit: minecraftoss_entities::world::MobHit, attack: minecraftoss_entities::world::PlayerAttack, inventory: &minecraftoss_player::inventory::Inventory, selected: usize) {
+        self.send(Command::MobAction { request: Some(request), hit, attack: Some(attack), inventory: Box::new(inventory.clone()), selected, infinite: false });
     }
 
     /// Outputs the server has produced since the last call.
@@ -1112,8 +1119,10 @@ fn server_loop(mut sim: ServerSim, commands: std::sync::mpsc::Receiver<Command>,
                 Command::Summon { kind, position, nbt, y_rot } => {
                     out.summoned.push(sim.summon(&kind, position, nbt.as_ref(), y_rot).map(|()| kind));
                 }
-                Command::MobAction { hit, attack, inventory, selected, infinite } => {
-                    out.mob_results.push(sim.mob_action(hit, attack, *inventory, selected, infinite));
+                Command::MobAction { request, hit, attack, inventory, selected, infinite } => {
+                    let mut result = sim.mob_action(hit, attack, *inventory, selected, infinite);
+                    result.request = request;
+                    out.mob_results.push(result);
                 }
                 Command::Merchant { op, inventory, selected, feet } => {
                     out.merchant.push(sim.merchant(op, *inventory, selected, feet));

@@ -34,7 +34,7 @@ pub use dispatch_state::{ConsoleCommandQueue, ConsoleDispatch, WaitMovePose};
 use dispatch_state::{WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args};
 pub use state::{ConsoleFont, ConsoleSettings, ConsoleState};
 
-const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FreeMono.otf");
+const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FiraMono-Regular.ttf");
 const PROMPT: &str = "> ";
 const FONT_SIZE: f32 = 15.0;
 const COLOR_BODY: Color = Color::srgb(0.82, 0.92, 0.82);
@@ -87,6 +87,7 @@ impl Plugin for ConsolePlugin {
         app.init_resource::<ConsoleSettings>()
             .init_resource::<ConsoleState>()
             .init_resource::<frame::HudInputView>()
+            .init_resource::<frame::KeyboardDigitInput>()
             .init_resource::<ConsoleInputState>()
             .init_resource::<KeyBinds>()
             .init_resource::<ConsoleCommandQueue>()
@@ -97,11 +98,22 @@ impl Plugin for ConsolePlugin {
             .init_resource::<crate::weapon_dispatch::WeaponArgCompletions>()
             .init_resource::<crate::user_settings::PendingMenuBinding>()
             .init_resource::<crate::user_settings::UserSettingsPersistence>()
+            .init_resource::<crate::game_folders::FolderPicks>()
+            .init_resource::<crate::saved_position::SavedPosition>()
+            .init_resource::<sim::LocalPlayerProfile>()
+            .init_resource::<crate::local_profile::ProfilePersistence>()
+            .init_resource::<crate::local_account::AccountPersistence>()
             .add_message::<ConsoleCommand>()
             .add_message::<frame::TestControllerRumble>()
             .add_systems(
                 Startup,
-                (setup_console, crate::user_settings::load_user_settings).chain(),
+                (
+                    setup_console,
+                    crate::user_settings::load_user_settings,
+                    crate::local_profile::load,
+                    crate::local_account::load,
+                )
+                    .chain(),
             )
             .add_systems(PreUpdate, feed_console_keyboard.before(InputSystems))
             .init_resource::<frame::ActivePad>()
@@ -125,6 +137,7 @@ impl Plugin for ConsolePlugin {
             .add_systems(
                 PreUpdate,
                 (
+                    crate::killstreak_controls::collect,
                     handle_console_input,
                     handle_scrollback_pointer,
                     copy_console_selection_on_release,
@@ -149,7 +162,12 @@ impl Plugin for ConsolePlugin {
                         apply_console_os_paste,
                         crate::feature_dispatch::route_replay_commands,
                         crate::feature_dispatch::route_ui_commands,
-                        (crate::frontend::route, crate::class_menu::route).chain(),
+                        (
+                            crate::frontend::route,
+                            crate::class_menu::route,
+                            crate::barracks_menu::route,
+                        )
+                            .chain(),
                         crate::feature_dispatch::route_capture_commands,
                         crate::feature_dispatch::route_state_dump_commands,
                         crate::feature_dispatch::route_hitvol_commands,
@@ -169,7 +187,10 @@ impl Plugin for ConsolePlugin {
                             crate::weapon_dispatch::echo_configuration_change_results,
                         )
                             .chain(),
-                        crate::debug_move::route_debug_move_commands,
+                        (
+                            crate::debug_move::route_debug_move_commands,
+                            crate::saved_position::route_saved_position_commands,
+                        ),
                         crate::debug_script_mover::route_debug_script_mover_commands,
                         crate::debug_draw_method::route_debug_draw_method_commands,
                         crate::debug_view_proj::route_view_proj_commands,
@@ -190,13 +211,21 @@ impl Plugin for ConsolePlugin {
                         crate::debug_fx_marks::route_fx_mark_commands,
                         (
                             crate::user_settings::native_menu_settings,
+                            crate::killstreak_settings::menu,
                             crate::skate_controls::native_menu_skate_controls,
                             crate::user_settings::consume_menu_binding,
+                            crate::game_folders::game_folder_menu,
+                            crate::community_servers::community_server_menu,
                         )
                             .chain(),
                         crate::user_settings::sync_binding_view,
                         crate::user_settings::apply_master_volume,
-                        crate::user_settings::sync_player_name,
+                        (
+                            crate::user_settings::sync_player_name,
+                            crate::killstreak_settings::sync,
+                            crate::barracks_menu::sync_profile,
+                        )
+                            .chain(),
                         crate::user_settings::save_user_settings,
                         update_console_ui,
                     )
@@ -209,6 +238,9 @@ impl Plugin for ConsolePlugin {
                 Last,
                 (
                     paint_scrollback_selection,
+                    crate::feature_dispatch::request_exit,
+                    crate::local_profile::save,
+                    crate::local_account::save,
                     crate::feature_dispatch::exit_process,
                 )
                     .chain(),
@@ -266,12 +298,14 @@ fn dispatch_menu_commands(
 fn isolate_gameplay_input(
     console: Res<ConsoleState>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut digits: ResMut<frame::KeyboardDigitInput>,
     mut mouse: MessageReader<MouseMotion>,
 ) {
     if !console.open {
         return;
     }
     keys.reset_all();
+    digits.clear_edges();
     for _ in mouse.read() {}
 }
 
@@ -283,12 +317,15 @@ struct PhysicalInputState {
     look_ready: bool,
     mouse_activity: f32,
     mouse_activity_start: f32,
-    prompts: Option<(bool, frame::PromptStyle)>,
+    prompts: Option<(bool, frame::PromptStyle, bool, bool)>,
 }
 
 fn publish_client_action_input(
+    digits: Res<frame::KeyboardDigitInput>,
     mut skate: ResMut<frame::SkateMode>,
-    time: Res<Time>,
+    // The clock `sample_client_input` reads: a press and the samples that
+    // time its hold must agree.
+    time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,
@@ -297,9 +334,11 @@ fn publish_client_action_input(
     binds: Res<KeyBinds>,
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
-    (script_menus, minecraft): (
+    (script_menus, minecraft, mut action_inbox, mut request_ids): (
         Option<Res<hud::ScriptMenus>>,
         Option<Res<frame::MinecraftUi>>,
+        Option<ResMut<net::ClientActionInbox>>,
+        ResMut<net::ActionRequestIds>,
     ),
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
@@ -354,7 +393,55 @@ fn publish_client_action_input(
         *wheel_carry = 0.0;
     }
     let script_menu = script_menus.is_some_and(|menus| menus.captures_input());
-    let inventory_open = minecraft.is_some_and(|ui| ui.active && ui.inventory_open);
+    let inventory_open = minecraft
+        .as_ref()
+        .is_some_and(|ui| ui.active && ui.inventory_open);
+    let minecraft_hotbar = minecraft.as_ref().is_some_and(|ui| ui.active);
+    let rewards = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .and_then(|meta| {
+            meta.client_dvars
+                .iter()
+                .find(|(key, _)| key == sim::script::killstreaks::REWARDS_DVAR)
+                .map(|(_, value)| value)
+        });
+    let reward_shortcuts = rewards.is_some();
+    let owned: Vec<String> = rewards
+        .into_iter()
+        .flat_map(|value| value.split('|'))
+        .map(str::to_owned)
+        .collect();
+    let selected = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .and_then(|meta| {
+            meta.client_dvars
+                .iter()
+                .find(|(key, _)| key == sim::script::killstreaks::SELECTED_DVAR)
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_default();
+    let mut rewards_changed =
+        hud_input.owned_killstreaks != owned || hud_input.selected_killstreak != selected;
+    hud_input.owned_killstreaks = owned;
+    hud_input.selected_killstreak = selected;
+    hud_input.killstreak_shortcuts = reward_shortcuts && !devices.pad_prompts;
+    let pages = hud_input.owned_killstreaks.len().div_ceil(9).max(1);
+    let old_page = hud_input.killstreak_page;
+    hud_input.killstreak_page %= pages;
+    let page_has_rewards = |page: usize| {
+        hud_input
+            .owned_killstreaks
+            .iter()
+            .skip(page * 9)
+            .take(9)
+            .any(|name| !name.is_empty())
+    };
+    if !page_has_rewards(hud_input.killstreak_page) {
+        hud_input.killstreak_page = (0..pages).find(|&page| page_has_rewards(page)).unwrap_or(0);
+    }
+    rewards_changed |= old_page != hud_input.killstreak_page;
     skate.input_blocked = console.open || script_menu;
     // The configured keyboard toggle sends the same gesture as both stick clicks.
     let sticks_clicked = pad.is_some_and(|pad| {
@@ -384,6 +471,8 @@ fn publish_client_action_input(
     let mut current = [0; input_iw4::KEY_COUNT];
     for (button, id) in binds.iter() {
         let id = crate::binds::gameplay_binding(button, id, akimbo);
+        let id = crate::binds::minecraft_binding(button, id, minecraft_hotbar);
+        let id = crate::killstreak_controls::binding(button, id, reward_shortcuts, Some(&digits));
         let key_num = host_keynum(button);
         if key_num < current.len() {
             current[key_num] = id;
@@ -444,6 +533,43 @@ fn publish_client_action_input(
         physical.look_ready = false;
     } else {
         out.pad_sensitivity = settings.pad_look_sensitivity();
+        if reward_shortcuts && digits.control_pressed[0] && !skate_pad_captured {
+            let current_page = hud_input.killstreak_page;
+            if let Some(page) = (1..pages)
+                .map(|offset| (current_page + offset) % pages)
+                .find(|&page| {
+                    hud_input
+                        .owned_killstreaks
+                        .iter()
+                        .skip(page * 9)
+                        .take(9)
+                        .any(|name| !name.is_empty())
+                })
+            {
+                hud_input.killstreak_page = page;
+                rewards_changed = true;
+            }
+        }
+        if reward_shortcuts
+            && let Some(index) =
+                crate::killstreak_controls::pressed_reward(&digits, skate_pad_captured)
+            && let Some(index) = Some(index + hud_input.killstreak_page * 9)
+            && let Some(name) = hud_input.owned_killstreaks.get(index)
+            && let Some(inbox) = action_inbox.as_deref_mut()
+            && let (Some(menu), Some(response)) = (
+                sim::menu_response_field(sim::script::killstreaks::USE_MENU),
+                sim::menu_response_field(&format!("{index}:{name}")),
+            )
+        {
+            let action = sim::ClientAction::MenuResponse {
+                request_id: request_ids.allocate(),
+                menu,
+                response,
+            };
+            if let Err(error) = inbox.push(local.0, action) {
+                diag::warn!(Net, "killstreak shortcut: {error}");
+            }
+        }
         out.pad_ads_sensitivity = settings.pad_ads_sensitivity;
         out.pad_acceleration = settings.pad_acceleration;
         if let Some(pad) = pad.filter(|_| !skate_pad_captured) {
@@ -470,6 +596,7 @@ fn publish_client_action_input(
             let key_num = host_keynum(button);
             if key_num >= input_iw4::KEY_COUNT
                 || physical.blocked.contains(&button)
+                || out.client.keys[key_num].binding == 0
                 || (skate_pad_captured && button.is_pad())
             {
                 continue;
@@ -550,14 +677,24 @@ fn publish_client_action_input(
         devices.pad_prompts = false;
         physical.mouse_activity = 0.0;
     }
-    let prompts = (devices.pad_prompts, devices.style);
-    if physical.prompts == Some(prompts) && !binds.is_changed() {
+    let prompts = (
+        devices.pad_prompts,
+        devices.style,
+        minecraft_hotbar,
+        reward_shortcuts,
+    );
+    hud_input.killstreak_shortcuts = reward_shortcuts && !devices.pad_prompts;
+    if physical.prompts == Some(prompts) && !binds.is_changed() && !rewards_changed {
         return;
     }
     physical.prompts = Some(prompts);
     let mut labels: Vec<_> = binds
         .iter()
         .filter(|(button, _)| button.is_pad() == devices.pad_prompts)
+        .filter(|(button, id)| crate::binds::minecraft_binding(*button, *id, minecraft_hotbar) != 0)
+        .filter(|(button, id)| {
+            crate::killstreak_controls::binding(*button, *id, reward_shortcuts, None) != 0
+        })
         .collect();
     labels.sort_by_key(|(button, _)| host_keynum(*button));
     hud_input.binding_keys.clear();
@@ -582,6 +719,19 @@ fn publish_client_action_input(
                 hud_input.action_slot_keys[index] = Some(label.clone());
             }
         }
+    }
+    if hud_input.killstreak_shortcuts {
+        hud_input.action_slot_keys[3] = hud_input
+            .owned_killstreaks
+            .iter()
+            .position(|name| !name.is_empty() && name == &hud_input.selected_killstreak)
+            .map(|index| {
+                if index / 9 == hud_input.killstreak_page {
+                    format!("CTRL+{}", index % 9 + 1)
+                } else {
+                    "CTRL+0".into()
+                }
+            });
     }
 }
 
@@ -752,6 +902,7 @@ fn setup_console(
     }
     crate::weapon_dispatch::register_weapon_commands(&mut registry, &weapon_completions);
     crate::debug_move::register_debug_move_commands(&mut registry);
+    crate::saved_position::register_saved_position_commands(&mut registry);
     crate::debug_script_mover::register_debug_script_mover_commands(&mut registry);
     crate::debug_draw_method::register_debug_draw_method_commands(&mut registry);
     crate::debug_view_proj::register_view_proj_commands(&mut registry);
@@ -775,6 +926,7 @@ fn setup_console(
     crate::feature_dispatch::register_feature_commands(&mut registry, &maps);
     crate::frontend::register(&mut registry);
     crate::class_menu::register(&mut registry);
+    crate::barracks_menu::register(&mut registry);
     let font = fonts.add(Font::from_bytes(EMBEDDED_FONT.to_vec()));
     commands.insert_resource(ConsoleFont(font.clone()));
 
@@ -1821,9 +1973,11 @@ fn dispatch_console_command(
     has_world: Option<Res<HasWorld>>,
     ambient_booted: Option<Res<audio::MapAmbientBooted>>,
     presented: Option<Res<PresentedSnapshot>>,
-    (authority, clock): (
+    (authority, clock, adopted, client_clock): (
         Option<Res<net::AuthorityWorld>>,
         Option<Res<net::AuthorityClock>>,
+        Option<Res<net::LastAdoptedSnapshot>>,
+        Option<Res<net::ClientClock>>,
     ),
     local: Option<Res<net::LocalPresentClient>>,
     (mut mark_sequence, headless): (Local<u64>, Option<Res<frame::Headless>>),
@@ -2153,6 +2307,8 @@ fn dispatch_console_command(
                 clock.as_deref(),
                 presented.as_deref(),
                 local.as_deref(),
+                adopted.as_deref(),
+                client_clock.as_deref(),
             );
             let line = format!(
                 "benchmark-mark: pid={} seq={} ns={ns} label={label}{rss}{heap}{facts}",
@@ -2234,9 +2390,43 @@ fn mark_match_facts(
     clock: Option<&net::AuthorityClock>,
     presented: Option<&PresentedSnapshot>,
     local: Option<&net::LocalPresentClient>,
+    adopted: Option<&net::LastAdoptedSnapshot>,
+    client_clock: Option<&net::ClientClock>,
 ) -> String {
     let Some(authority) = authority else {
-        return String::new();
+        let Some(snapshot) = adopted
+            .and_then(net::LastAdoptedSnapshot::next)
+            .or_else(|| presented.and_then(PresentedSnapshot::snapshot))
+        else {
+            return String::new();
+        };
+        let mut out = format!(
+            " tick={} clients={}",
+            snapshot.tick.0,
+            snapshot.players.len()
+        );
+        if let Some(presented_tick) = presented
+            .and_then(PresentedSnapshot::snapshot)
+            .map(|s| s.tick.0)
+        {
+            out.push_str(&format!(" presented_tick={presented_tick}"));
+        }
+        if let Some(clock) = client_clock {
+            out.push_str(&format!(" clock_debt_ms={:.2}", clock.debt_ms()));
+        }
+        if let Some(local) = local {
+            out.push_str(&format!(" local_id={}", local.0.0));
+            if let Some(meta) = snapshot.meta.for_client(local.0) {
+                out.push_str(&format!(" local={:?}", meta.lifecycle));
+            }
+            if let Some((_, ps)) = snapshot.players.iter().find(|(id, _)| *id == local.0) {
+                out.push_str(&format!(
+                    " origin={:.1},{:.1},{:.1} yaw={:.1}",
+                    ps.origin[0], ps.origin[1], ps.origin[2], ps.viewangles[1]
+                ));
+            }
+        }
+        return out;
     };
     let board = authority.0.clients_scoreboard();
     let alive = board
@@ -2251,6 +2441,13 @@ fn mark_match_facts(
         board.len()
     );
     if let Some(local) = local {
+        out.push_str(&format!(" local_id={}", local.0.0));
+        for (id, meta) in &board {
+            out.push_str(&format!(
+                " client{}_cmds={} client{}_path={:.1}",
+                id.0, meta.input_receipt.applied_cmds, id.0, meta.input_receipt.path_units
+            ));
+        }
         let meta = authority.0.client_meta(local.0);
         let life = meta
             .map(|m| format!("{:?}", m.lifecycle))

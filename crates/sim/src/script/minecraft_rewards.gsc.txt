@@ -1,0 +1,86 @@
+#include maps\mp\_utility;
+
+hit()
+{
+    self maps\mp\gametypes\_damagefeedback::updateDamageFeedback("standard");
+}
+
+kill(all_rewards)
+{
+    self incPersStat("kills", 1);
+    self.kills = self getPersStat("kills");
+    self incPlayerStat("kills", 1);
+    self.pers["cur_death_streak"] = 0;
+    self.pers["cur_kill_streak"]++;
+    self.kill_streak = self.pers["cur_kill_streak"];
+    self setPlayerStatIfGreater("killstreak", self.kill_streak);
+    if (self.kill_streak > self getPersStat("longestStreak"))
+        self setPersStat("longestStreak", self.kill_streak);
+    self maps\mp\gametypes\_persistence::statSetChild("round", "kills", self.kills);
+    self maps\mp\gametypes\_persistence::statSetChild("round", "killStreak", self.kill_streak);
+    self maps\mp\gametypes\_persistence::statSet("killStreak", self.kill_streak);
+    self award_xp();
+    maps\mp\gametypes\_gamescore::givePlayerScore("kill", self, undefined);
+    if (!all_rewards)
+        self maps\mp\killstreaks\_killstreaks::checkKillstreakReward(self.kill_streak);
+    self notify("killed_enemy");
+}
+
+award_all(names, costs)
+{
+    count = self.pers["cur_kill_streak"];
+    life = self.pers["deaths"];
+    if (!isDefined(self.iw4l_reward_life) || self.iw4l_reward_life != life || !isDefined(self.iw4l_reward_count) || count < self.iw4l_reward_count)
+    {
+        self.iw4l_reward_life = life;
+        self.iw4l_reward_count = 0;
+    }
+    before = self.iw4l_reward_count;
+    self.iw4l_reward_count = count;
+    modifier = level.killStreakMod;
+    if (self _hasPerk("specialty_hardline"))
+        modifier--;
+    for (i = 0; i < names.size; i++)
+    {
+        threshold = costs[i] + modifier;
+        if (threshold > before && threshold <= count)
+            self maps\mp\killstreaks\_killstreaks::tryGiveKillstreak(names[i], threshold);
+    }
+}
+
+award_xp()
+{
+    if (!self rankingEnabled())
+        return;
+    if (!isDefined(self.xpGains["kill"]))
+        self.xpGains["kill"] = 0;
+    value = maps\mp\gametypes\_rank::getScoreInfoValue("kill");
+    if (isDefined(self.lastStand))
+        value *= 2;
+    value *= self.xpScaler;
+    lives = getGametypeNumLives();
+    if (lives > 0)
+        value = int(value * max(1, int(10 / lives)));
+    value = int(value * level.xpScale);
+    rested = self maps\mp\gametypes\_rank::getRestXPAward(value);
+    value += rested;
+    color = (1, 1, 0.5);
+    if (rested > 0)
+    {
+        color = (1, 0.65, 0);
+        if (self maps\mp\gametypes\_rank::isLastRestXPAward(value))
+            self thread maps\mp\gametypes\_hud_message::splashNotify("rested_done");
+    }
+    else if (isDefined(self getPlayerData("restXPGoal")) && self getPlayerData("restXPGoal") > self maps\mp\gametypes\_rank::getRankXP())
+        self setPlayerData("restXPGoal", self getPlayerData("restXPGoal") + value);
+    before = self maps\mp\gametypes\_rank::getRankXP();
+    self.xpGains["kill"] += value;
+    self maps\mp\gametypes\_rank::incRankXP(value);
+    if (self maps\mp\gametypes\_rank::updateRank(before))
+        self thread maps\mp\gametypes\_rank::updateRankAnnounceHUD();
+    self maps\mp\gametypes\_rank::syncXPStat();
+    self.pers["summary"]["score"] += value;
+    self.pers["summary"]["xp"] += value;
+    if (!level.hardcoreMode)
+        self thread maps\mp\gametypes\_rank::scorePopup(value, 0, color, 0);
+}

@@ -66,7 +66,10 @@ fn bump_region(min: [i32; 3], max: [i32; 3]) {
 
 /// A chunk column's block box.
 fn chunk_region(x: i32, z: i32) -> ([i32; 3], [i32; 3]) {
-    ([x * 16, i32::MIN, z * 16], [x * 16 + 15, i32::MAX, z * 16 + 15])
+    (
+        [x * 16, i32::MIN, z * 16],
+        [x * 16 + 15, i32::MAX, z * 16 + 15],
+    )
 }
 
 /// Whether any change after `since` touched the blocks within `radius`
@@ -87,11 +90,18 @@ pub fn changed_near(since: u64, centre: [f32; 3], radius: i32, depth: i32) -> bo
     let Ok(log) = CHANGES.lock() else {
         return true;
     };
-    if log.front().is_none_or(|(revision, ..)| *revision > since + 1) {
+    if log
+        .front()
+        .is_none_or(|(revision, ..)| *revision > since + 1)
+    {
         return true;
     }
     let c = to_block(origin, centre);
-    let (cx, cy, cz) = (c[0].floor() as i32, c[1].floor() as i32, c[2].floor() as i32);
+    let (cx, cy, cz) = (
+        c[0].floor() as i32,
+        c[1].floor() as i32,
+        c[2].floor() as i32,
+    );
     let lo = [cx - radius - 1, cy - depth - 1, cz - radius - 1];
     let hi = [cx + radius + 1, cy + depth + 1, cz + radius + 1];
     log.iter()
@@ -102,6 +112,13 @@ pub fn changed_near(since: u64, centre: [f32; 3], radius: i32, depth: i32) -> bo
 /// Changes with every change to the block world's collision.
 pub fn revision() -> u64 {
     REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The player and life that caused an attack, retained until Minecraft confirms it.
+#[derive(Clone, Copy, Debug)]
+pub struct MobAttackCredit {
+    pub client: crate::ClientId,
+    pub life: crate::LifeSequence,
 }
 
 /// What the authoritative game did to the block world this tick, for the
@@ -115,10 +132,19 @@ pub enum VoxelEvent {
     Explosion { center: [f64; 3] },
     /// A bullet struck the mob with this key, with the damage it would have
     /// done at that range, from this block point.
-    MobShot { key: u64, damage: f32, from: [f64; 3] },
+    MobShot {
+        key: u64,
+        damage: f32,
+        from: [f64; 3],
+        credit: MobAttackCredit,
+    },
     /// A bullet's path through the air, in blocks, up to what stopped it:
     /// blocks without collision on it (grass, flowers) take its damage.
-    Ray { from: [f64; 3], to: [f64; 3], damage: f32 },
+    Ray {
+        from: [f64; 3],
+        to: [f64; 3],
+        damage: f32,
+    },
 }
 
 static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::new());
@@ -134,7 +160,11 @@ pub fn push_shot(end: [f32; 3], normal: [f32; 3], damage: f32) {
     };
     let p = to_block(world.origin, end);
     // Into the surface, past the trace's pull-back.
-    let n = [f64::from(normal[0]), f64::from(normal[2]), -f64::from(normal[1])];
+    let n = [
+        f64::from(normal[0]),
+        f64::from(normal[2]),
+        -f64::from(normal[1]),
+    ];
     let block = std::array::from_fn(|k| (p[k] - n[k] * 0.05).floor() as i32);
     if let Ok(mut events) = EVENTS.lock() {
         events.push(VoxelEvent::Shot { block, damage });
@@ -202,7 +232,8 @@ pub(crate) fn mob_on_segment(start: [f32; 3], end: [f32; 3]) -> Option<(u64, f32
         }
     }
     let length = f64::from(
-        ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2) + (end[2] - start[2]).powi(2)).sqrt(),
+        ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2) + (end[2] - start[2]).powi(2))
+            .sqrt(),
     );
     best.map(|(key, t, up)| (key, (t * length) as f32, up as f32))
 }
@@ -259,7 +290,7 @@ pub fn mob_targets() -> Vec<(u64, [f32; 3], [f32; 3])> {
         .collect()
 }
 
-pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3]) {
+pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3], credit: MobAttackCredit) {
     let Ok(world) = WORLD.read() else {
         return;
     };
@@ -268,13 +299,19 @@ pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3]) {
     };
     let from = to_block(world.origin, from);
     if let Ok(mut events) = EVENTS.lock() {
-        events.push(VoxelEvent::MobShot { key, damage, from });
+        events.push(VoxelEvent::MobShot {
+            key,
+            damage,
+            from,
+            credit,
+        });
     }
 }
 
 /// Damage the world's mobs dealt the players: client, amount, and where it
 /// came from in map space.
-static PLAYER_DAMAGE: std::sync::Mutex<Vec<(u32, i32, Option<[f32; 3]>)>> = std::sync::Mutex::new(Vec::new());
+static PLAYER_DAMAGE: std::sync::Mutex<Vec<(u32, i32, Option<[f32; 3]>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 pub fn push_player_damage(client: u32, amount: i32, from: Option<[f32; 3]>) {
     if let Ok(mut damage) = PLAYER_DAMAGE.lock() {
@@ -283,11 +320,17 @@ pub fn push_player_damage(client: u32, amount: i32, from: Option<[f32; 3]>) {
 }
 
 pub(crate) fn take_player_damage() -> Vec<(u32, i32, Option<[f32; 3]>)> {
-    PLAYER_DAMAGE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default()
+    PLAYER_DAMAGE
+        .lock()
+        .map(|mut d| std::mem::take(&mut *d))
+        .unwrap_or_default()
 }
 
 pub fn take_events() -> Vec<VoxelEvent> {
-    EVENTS.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default()
+    EVENTS
+        .lock()
+        .map(|mut events| std::mem::take(&mut *events))
+        .unwrap_or_default()
 }
 
 /// Sets one block's collision shape id, as `set_chunk` lays them out.
@@ -371,7 +414,11 @@ pub fn collision_triangles(centre: [f32; 3], radius: i32, depth: i32) -> Vec<[[f
     let Some(world) = world.as_ref() else {
         return Vec::new();
     };
-    let full: Vec<bool> = world.shapes.iter().map(|b| b.len() == 1 && b[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).collect();
+    let full: Vec<bool> = world
+        .shapes
+        .iter()
+        .map(|b| b.len() == 1 && b[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+        .collect();
     let is_full = |x: i32, y: i32, z: i32| -> bool {
         let Some(chunk) = world.chunks.get(&(x >> 4, z >> 4)) else {
             return false;
@@ -384,7 +431,11 @@ pub fn collision_triangles(centre: [f32; 3], radius: i32, depth: i32) -> Vec<[[f
         full.get(usize::from(id)).copied().unwrap_or(false)
     };
     let c = to_block(world.origin, centre);
-    let (cx, cy, cz) = (c[0].floor() as i32, c[1].floor() as i32, c[2].floor() as i32);
+    let (cx, cy, cz) = (
+        c[0].floor() as i32,
+        c[1].floor() as i32,
+        c[2].floor() as i32,
+    );
     let mut out = Vec::new();
     for x in cx - radius..=cx + radius {
         for z in cz - radius..=cz + radius {
@@ -437,10 +488,58 @@ pub fn collision_triangles(centre: [f32; 3], radius: i32, depth: i32) -> Vec<[[f
 
 /// Whether traces against `brushes` go to the block world.
 pub(crate) fn active_for(brushes: &[SimBrush]) -> bool {
-    WORLD
-        .read()
-        .ok()
-        .is_some_and(|world| world.as_ref().is_some_and(|w| w.brushes == brushes.as_ptr() as usize))
+    WORLD.read().ok().is_some_and(|world| {
+        world
+            .as_ref()
+            .is_some_and(|w| w.brushes == brushes.as_ptr() as usize)
+    })
+}
+
+pub fn spawn_origin() -> Option<[f32; 3]> {
+    use crate::bullet_collision::{PLAYER_MAXS, PLAYER_MINS};
+    let mut surfaces = {
+        let guard = WORLD.read().ok()?;
+        let world = guard.as_ref()?;
+        let scale = f64::from(BLOCK);
+        let min_x = (world.origin[0] + f64::from(PLAYER_MINS[0]) / scale).floor() as i32;
+        let max_x = (world.origin[0] + f64::from(PLAYER_MAXS[0]) / scale).floor() as i32;
+        let min_z = (world.origin[2] - f64::from(PLAYER_MAXS[1]) / scale).floor() as i32;
+        let max_z = (world.origin[2] - f64::from(PLAYER_MINS[1]) / scale).floor() as i32;
+        let mut surfaces = Vec::new();
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
+                for y in chunk.min_y..chunk.min_y + chunk.height {
+                    for shape in world.shape_at(x, y, z) {
+                        let height =
+                            ((f64::from(y) + f64::from(shape[4]) - world.origin[1]) * scale) as f32;
+                        surfaces.push(height + SURFACE_CLIP_EPSILON);
+                    }
+                }
+            }
+        }
+        surfaces
+    };
+    surfaces.sort_by(|a, b| a.abs().total_cmp(&b.abs()).then(a.total_cmp(b)));
+    surfaces.dedup();
+    surfaces.into_iter().find_map(|height| {
+        let feet = [0.0, 0.0, height];
+        let clear = trace(feet, feet, PLAYER_MINS, PLAYER_MAXS);
+        if clear.startsolid != 0 || clear.allsolid != 0 {
+            return None;
+        }
+        let below = [0.0, 0.0, height - 0.25];
+        let floor = trace(feet, below, PLAYER_MINS, PLAYER_MAXS);
+        if floor.startsolid != 0
+            || floor.allsolid != 0
+            || floor.fraction >= 1.0
+            || floor.walkable == 0
+        {
+            return None;
+        }
+        let clear = trace(floor.endpos, floor.endpos, PLAYER_MINS, PLAYER_MAXS);
+        (clear.startsolid == 0 && clear.allsolid == 0).then_some(floor.endpos)
+    })
 }
 
 /// Whether any block world is standing in for a map.
@@ -492,11 +591,20 @@ struct Sweep {
 impl VoxelWorld {
     /// A block-space box `[lo, hi]` about `a` moved to `b`: the first hit as
     /// a fraction of the move and its normal, or whether it starts inside.
-    fn sweep(&self, a: [f64; 3], b: [f64; 3], lo: [f64; 3], hi: [f64; 3], test_start: bool) -> Sweep {
+    fn sweep(
+        &self,
+        a: [f64; 3],
+        b: [f64; 3],
+        lo: [f64; 3],
+        hi: [f64; 3],
+        test_start: bool,
+    ) -> Sweep {
         const INSIDE: f64 = 1e-4;
         let delta: [f64; 3] = std::array::from_fn(|k| b[k] - a[k]);
-        let reach_lo: [i32; 3] = std::array::from_fn(|k| (a[k].min(b[k]) + lo[k] - 1.0).floor() as i32);
-        let reach_hi: [i32; 3] = std::array::from_fn(|k| (a[k].max(b[k]) + hi[k] + 1.0).floor() as i32);
+        let reach_lo: [i32; 3] =
+            std::array::from_fn(|k| (a[k].min(b[k]) + lo[k] - 1.0).floor() as i32);
+        let reach_hi: [i32; 3] =
+            std::array::from_fn(|k| (a[k].max(b[k]) + hi[k] + 1.0).floor() as i32);
         let mut out = Sweep {
             first: None,
             start_solid: false,
@@ -538,7 +646,8 @@ impl VoxelWorld {
                                 }
                                 continue;
                             }
-                            let (t0, t1) = ((bmin[k] - a[k]) / delta[k], (bmax[k] - a[k]) / delta[k]);
+                            let (t0, t1) =
+                                ((bmin[k] - a[k]) / delta[k], (bmax[k] - a[k]) / delta[k]);
                             let (near, far) = (t0.min(t1), t0.max(t1));
                             if near > t_in {
                                 t_in = near;
@@ -635,6 +744,8 @@ pub(crate) fn trace(
             allsolid: u8::from(end_solid),
             contents: SOLID,
             surface_flags: STONE_SURFACE,
+            hit_type: trace_iw4::HITTYPE_ENTITY,
+            hit_id: trace_iw4::ENTITYNUM_WORLD,
             ..trace_iw4::Trace::default()
         };
     }
@@ -656,6 +767,8 @@ pub(crate) fn trace(
         contents: SOLID,
         surface_flags: STONE_SURFACE,
         walkable: u8::from(n[1] > 0.7),
+        hit_type: trace_iw4::HITTYPE_ENTITY,
+        hit_id: trace_iw4::ENTITYNUM_WORLD,
         ..trace_iw4::Trace::default()
     }
 }

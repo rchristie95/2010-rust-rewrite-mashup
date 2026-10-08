@@ -332,6 +332,7 @@ pub struct HostClassSlot {
     pub perks: [String; 3],
 
     pub deathstreak: String,
+    pub camos: [String; 2],
 }
 
 impl Default for HostClassLoadouts {
@@ -346,6 +347,25 @@ impl Default for HostClassLoadouts {
     }
 }
 
+/// Modifier state must be captured at key-down, before frame aggregation loses ordering.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct KeyboardDigitInput {
+    pub plain_pressed: [bool; 10],
+    pub control_pressed: [bool; 10],
+    pub control_captured: [bool; 10],
+}
+
+impl KeyboardDigitInput {
+    pub fn clear_edges(&mut self) {
+        self.plain_pressed.fill(false);
+        self.control_pressed.fill(false);
+    }
+
+    pub fn suppresses_plain(&self, digit: usize) -> bool {
+        (self.control_captured[digit] || self.control_pressed[digit]) && !self.plain_pressed[digit]
+    }
+}
+
 #[derive(Resource, Clone, Debug, Default)]
 pub struct HudInputView {
     pub use_key: Option<String>,
@@ -353,11 +373,76 @@ pub struct HudInputView {
     pub console_open: bool,
     pub script_menu_open: bool,
     pub action_slot_keys: [Option<String>; 4],
+    pub owned_killstreaks: Vec<String>,
+    pub selected_killstreak: String,
+    pub killstreak_shortcuts: bool,
+    pub killstreak_page: usize,
+}
+
+impl HudInputView {
+    pub fn killstreak_key(&self, name: &str) -> Option<String> {
+        if name.is_empty() {
+            return None;
+        }
+        self.killstreak_shortcuts.then_some(())?;
+        self.owned_killstreaks
+            .iter()
+            .position(|reward| reward == name)
+            .map(|index| {
+                if index / 9 == self.killstreak_page {
+                    format!("CTRL+{}", index % 9 + 1)
+                } else {
+                    format!("CTRL+0: PAGE {}, CTRL+{}", index / 9 + 1, index % 9 + 1)
+                }
+            })
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalSpawnArmed(pub WorldGeneration);
+
+impl LocalSpawnArmed {
+    pub fn armed_for(self, generation: WorldGeneration) -> bool {
+        generation.0.is_some() && self.0 == generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReadinessState {
+    #[default]
+    Pending,
+    Ready,
+    Silent,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorldReadiness {
+    pub generation: WorldGeneration,
+    pub state: ReadinessState,
+}
+
+impl WorldReadiness {
+    pub fn new(generation: WorldGeneration, state: ReadinessState) -> Self {
+        Self { generation, state }
+    }
+
+    pub fn ready_for(self, generation: WorldGeneration) -> bool {
+        generation.0.is_some()
+            && self.generation == generation
+            && matches!(self.state, ReadinessState::Ready | ReadinessState::Silent)
+    }
+
+    pub fn failed_for(self, generation: WorldGeneration) -> bool {
+        generation.0.is_some()
+            && self.generation == generation
+            && self.state == ReadinessState::Failed
+    }
 }
 
 /// Authority navigation is prepared while the loading screen is still active.
 #[derive(bevy::prelude::Resource, Default)]
-pub struct BotNavigationReady(pub bool);
+pub struct BotNavigationReady(pub WorldReadiness);
 
 #[derive(Component)]
 pub struct UiCamera;

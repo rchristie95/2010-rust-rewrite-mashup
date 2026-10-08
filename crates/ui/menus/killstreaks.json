@@ -1,0 +1,505 @@
+[
+  {
+    "name": "options_killstreaks",
+    "fields": {
+      "handlers": {
+        "close": [],
+        "esc": [
+          {
+            "Script": "close self;"
+          }
+        ],
+        "open": [
+          {
+            "Script": "focusFirst;"
+          }
+        ]
+      }
+    },
+    "item_overrides": [
+      {
+        "name": "video_resolution",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_resolution_label",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_brightness",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_brightness_label",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_display_mode",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_advanced",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_fov",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_fov_label",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_title",
+        "fields": {
+          "text_key": "Killstreaks"
+        }
+      }
+    ],
+    "item_copies": [
+      {
+        "name": "video_display_mode",
+        "fields": {
+          "fore_color": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "vis_exp": "1",
+          "background": "menu_button_selection_bar",
+          "static_flags": 0,
+          "dvar": "ui_killstreak_0",
+          "back_color": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "choices": [],
+          "font_enum": 3,
+          "text_exp": "",
+          "text_align_mode": 10,
+          "item_type": 12,
+          "disabled_exp": "0",
+          "style": 1,
+          "text_align_x": -8,
+          "rect": {
+            "y": 40,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "text_key": "",
+          "name": "killstreak_pick_0",
+          "text_scale": 0.29,
+          "handlers": {
+            "action": [
+              {
+                "Script": "play mouse_click;"
+              }
+            ],
+            "focus": [
+              {
+                "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
+              }
+            ],
+            "leave_focus": [
+              {
+                "Script": "setItemColor self backcolor 0 0 0 0;"
+              }
+            ]
+          },
+          "text_align_y": 0
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "killstreak_label_0",
+          "rect": {
+            "y": 23,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Match reward 1",
+          "text_scale": 0.28,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode",
+        "fields": {
+          "fore_color": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "vis_exp": "1",
+          "background": "menu_button_selection_bar",
+          "static_flags": 0,
+          "dvar": "ui_killstreak_1",
+          "back_color": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "choices": [],
+          "font_enum": 3,
+          "text_exp": "",
+          "text_align_mode": 10,
+          "item_type": 12,
+          "disabled_exp": "0",
+          "style": 1,
+          "text_align_x": -8,
+          "rect": {
+            "y": 82,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "text_key": "",
+          "name": "killstreak_pick_1",
+          "text_scale": 0.29,
+          "handlers": {
+            "action": [
+              {
+                "Script": "play mouse_click;"
+              }
+            ],
+            "focus": [
+              {
+                "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
+              }
+            ],
+            "leave_focus": [
+              {
+                "Script": "setItemColor self backcolor 0 0 0 0;"
+              }
+            ]
+          },
+          "text_align_y": 0
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "killstreak_label_1",
+          "rect": {
+            "y": 65,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Match reward 2",
+          "text_scale": 0.28,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode",
+        "fields": {
+          "fore_color": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "vis_exp": "1",
+          "background": "menu_button_selection_bar",
+          "static_flags": 0,
+          "dvar": "ui_killstreak_2",
+          "back_color": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "choices": [],
+          "font_enum": 3,
+          "text_exp": "",
+          "text_align_mode": 10,
+          "item_type": 12,
+          "disabled_exp": "0",
+          "style": 1,
+          "text_align_x": -8,
+          "rect": {
+            "y": 124,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "text_key": "",
+          "name": "killstreak_pick_2",
+          "text_scale": 0.29,
+          "handlers": {
+            "action": [
+              {
+                "Script": "play mouse_click;"
+              }
+            ],
+            "focus": [
+              {
+                "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
+              }
+            ],
+            "leave_focus": [
+              {
+                "Script": "setItemColor self backcolor 0 0 0 0;"
+              }
+            ]
+          },
+          "text_align_y": 0
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "killstreak_label_2",
+          "rect": {
+            "y": 107,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Match reward 3",
+          "text_scale": 0.28,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode",
+        "fields": {
+          "fore_color": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "vis_exp": "1",
+          "background": "menu_button_selection_bar",
+          "static_flags": 0,
+          "dvar": "ui_minecraft_all_killstreaks",
+          "back_color": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "choices": [
+            [
+              "All rewards in order",
+              "1"
+            ],
+            [
+              "Selected three rewards",
+              "0"
+            ]
+          ],
+          "font_enum": 3,
+          "text_exp": "",
+          "text_align_mode": 10,
+          "item_type": 12,
+          "disabled_exp": "0",
+          "style": 1,
+          "text_align_x": -8,
+          "rect": {
+            "y": 183,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "text_key": "",
+          "name": "minecraft_reward_mode",
+          "text_scale": 0.29,
+          "handlers": {
+            "action": [
+              {
+                "Script": "play mouse_click;"
+              }
+            ],
+            "focus": [
+              {
+                "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
+              }
+            ],
+            "leave_focus": [
+              {
+                "Script": "setItemColor self backcolor 0 0 0 0;"
+              }
+            ]
+          },
+          "text_align_y": 0
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_166",
+          "rect": {
+            "y": 166,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Minecraft rewards",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_228",
+          "rect": {
+            "y": 228,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Match rewards need different kill counts.",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_248",
+          "rect": {
+            "y": 248,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Ctrl+1-9 uses rewards; Ctrl+0 changes reward page.",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_278",
+          "rect": {
+            "y": 278,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "All rewards: 3, 4, 5, 6, 7, 8, 9, 11, 15 and 25 kills.",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_298",
+          "rect": {
+            "y": 298,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Rewards sharing a kill count are all awarded.",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_318",
+          "rect": {
+            "y": 318,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "The sequence restarts after death. Hardline applies.",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_hint_348",
+          "rect": {
+            "y": 348,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "Match shortcuts follow kill-count order.",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": ""
+        }
+      },
+      {
+        "name": "video_display_mode_label",
+        "fields": {
+          "name": "reward_status",
+          "rect": {
+            "y": 383,
+            "x": 232,
+            "h": 19,
+            "w": 344
+          },
+          "vis_exp": "1",
+          "text_key": "",
+          "text_scale": 0.23,
+          "disabled_exp": "0",
+          "text_exp": "op 38 s:75695f6b696c6c73747265616b5f737461747573 op 1"
+        }
+      }
+    ],
+    "base": "pc_options_video"
+  }
+]

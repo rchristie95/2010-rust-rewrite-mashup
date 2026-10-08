@@ -66,6 +66,9 @@ pub(crate) struct Entities {
     /// volume, pitch.
     pub(crate) sounds: Vec<(String, DVec3, f32, f32)>,
     random: minecraftoss_player::rng::LegacyRandom,
+    attacks: HashMap<u64, sim::voxel::MobAttackCredit>,
+    next_attack: u64,
+    feedback: Vec<(sim::voxel::MobAttackCredit, u32)>,
 }
 
 /// What bullets and blasts count as for block loot: vanilla drops nothing
@@ -144,6 +147,9 @@ impl Entities {
             seed,
             sounds: Vec::new(),
             random: minecraftoss_player::rng::LegacyRandom::new((seed ^ 0x1735) as u64),
+            attacks: HashMap::new(),
+            next_attack: 0,
+            feedback: Vec::new(),
         }
     }
 
@@ -294,7 +300,7 @@ impl Entities {
 
     /// A fist on the mob the player looks at within reach (one damage, as
     /// an empty hand deals).
-    pub(crate) fn punch(&mut self, eye: DVec3, look: DVec3, yaw: f32) -> bool {
+    pub(crate) fn punch(&mut self, eye: DVec3, look: DVec3, yaw: f32, credit: sim::voxel::MobAttackCredit) -> bool {
         let Some((hit, _)) = self.world.mob_on_ray(eye, look, 3.0) else {
             return false;
         };
@@ -308,7 +314,9 @@ impl Entities {
             can_critical: false,
             can_sweep: false,
         };
-        self.server.mob_action(hit, Some(attack), &self.inventory.clone(), self.selected, false);
+        self.next_attack = self.next_attack.wrapping_add(1);
+        self.attacks.insert(self.next_attack, credit);
+        self.server.credited_mob_attack(self.next_attack, hit, attack, &self.inventory.clone(), self.selected);
         true
     }
 
@@ -331,7 +339,7 @@ impl Entities {
 
     /// A bullet on a mob: an attack with the bullet's damage from where it
     /// was fired.
-    pub(crate) fn shoot(&mut self, key: u64, damage: f32, from: [f64; 3], yaw: f32) {
+    pub(crate) fn shoot(&mut self, key: u64, damage: f32, from: [f64; 3], yaw: f32, credit: sim::voxel::MobAttackCredit) {
         let Some(hit) = decode(key) else {
             return;
         };
@@ -345,8 +353,13 @@ impl Entities {
             can_critical: false,
             can_sweep: false,
         };
-        self.server
-            .mob_action(hit, Some(attack), &minecraftoss_player::inventory::Inventory::default(), 0, false);
+        self.next_attack = self.next_attack.wrapping_add(1);
+        self.attacks.insert(self.next_attack, credit);
+        self.server.credited_mob_attack(self.next_attack, hit, attack, &Inventory::default(), 0);
+    }
+
+    pub(crate) fn take_feedback(&mut self) -> Vec<(sim::voxel::MobAttackCredit, u32)> {
+        std::mem::take(&mut self.feedback)
     }
 
     /// Sends a server tick when one is due and takes what came back: block
@@ -441,6 +454,13 @@ impl Entities {
             }
             for sound in output.mob_results.iter().flat_map(|result| result.sounds.iter()) {
                 self.sounds.push((sound.event.clone(), sound.position, sound.volume, sound.pitch));
+            }
+            for result in &output.mob_results {
+                if let Some(credit) = result.request.and_then(|request| self.attacks.remove(&request)) {
+                    if result.hurt {
+                        self.feedback.push((credit, result.kills));
+                    }
+                }
             }
             // `ServerExplosion`'s sound: loud, pitched down.
             for blast in &output.explosions {

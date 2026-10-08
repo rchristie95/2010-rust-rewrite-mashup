@@ -47,6 +47,24 @@ pub(crate) fn fire_accepted_shot(world: &mut FrameWorld, tick: crate::Tick, shot
     }
 }
 
+fn launch_velocity(
+    facts: crate::EquipmentRuntimeFacts,
+    dir: [f32; 3],
+    owner: [f32; 3],
+) -> [f32; 3] {
+    let speed = facts.projectile_speed as f32;
+    let lift = if facts.missile_guidance == 3 {
+        facts.projectile_speed_up as f32
+    } else {
+        0.0
+    };
+    [
+        dir[0] * speed + owner[0],
+        dir[1] * speed + owner[1],
+        dir[2] * speed + lift + owner[2],
+    ]
+}
+
 pub(crate) fn magic_bullet(
     world: &mut FrameWorld,
     tick: crate::Tick,
@@ -64,6 +82,7 @@ pub(crate) fn magic_bullet(
         .life_sequence;
     let shot = AcceptedShot {
         shot_id: crate::ShotId(0),
+        fire_cause: None,
         attacker: owner,
         attacker_life,
         hand: 0,
@@ -152,8 +171,6 @@ fn fire_missile(
         top: lock.is_some_and(|lock| lock.flags & 4 != 0),
         ..Default::default()
     };
-    let speed = facts.projectile_speed as f32;
-    let gun_vel = shot.owner_velocity;
     let id = world.allocate_projectile_id();
     let entnum = match world.allocate_dynamic_entity(crate::gentity::EntityRunKind::Missile) {
         Ok(entity) => entity.number(),
@@ -163,16 +180,9 @@ fn fire_missile(
         }
     };
     let time_ms = crate::level_time_ms(tick);
-    let velocity = truncated_tr_delta([
-        dir[0] * speed + gun_vel[0],
-        dir[1] * speed + gun_vel[1],
-        dir[2] * speed + facts.projectile_speed_up as f32 + gun_vel[2],
-    ]);
-    let raw_speed = vec3_length([
-        dir[0] * speed + gun_vel[0],
-        dir[1] * speed + gun_vel[1],
-        dir[2] * speed + facts.projectile_speed_up as f32 + gun_vel[2],
-    ]);
+    let raw_velocity = launch_velocity(facts, dir, shot.owner_velocity);
+    let velocity = truncated_tr_delta(raw_velocity);
+    let raw_speed = vec3_length(raw_velocity);
     let pos = Trajectory {
         tr_time: time_ms,
         tr_type: if facts.missile_guidance == 3 {

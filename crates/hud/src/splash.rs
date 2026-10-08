@@ -92,8 +92,15 @@ impl SplashExprHost<'_> {
         })
     }
 
-    fn cell_text(&self, cell: &str, optional_number: i32) -> String {
-        let translated = hud_iw4::replace_directive(&self.loc(cell), |cmd| self.key_for(cmd));
+    fn cell_text(&self, cell: &str, optional_number: i32, reward: &str) -> String {
+        let translated = hud_iw4::replace_directive(&self.loc(cell), |cmd| {
+            if cmd == "+actionslot 4"
+                && let Some(key) = self.input.and_then(|input| input.killstreak_key(reward))
+            {
+                return key;
+            }
+            self.key_for(cmd)
+        });
         splash_replace_optional(&translated, optional_number)
     }
 }
@@ -159,7 +166,12 @@ impl ExprHost for SplashExprHost<'_> {
             Some(t) => t.cell(s.row, SPLASH_COL_TEXT),
             None => "",
         };
-        Ok(Operand::Str(self.cell_text(cell, s.optional_number)))
+        let reward = self.table.map_or("", |table| table.cell(s.row, 0));
+        Ok(Operand::Str(self.cell_text(
+            cell,
+            s.optional_number,
+            reward,
+        )))
     }
     fn splash_description(&self, slot: i32) -> Result<Operand, ExprError> {
         let Some(s) = self.slot(slot) else {
@@ -172,7 +184,28 @@ impl ExprHost for SplashExprHost<'_> {
             Some(t) => t.cell(s.row, SPLASH_COL_DESCRIPTION),
             None => "",
         };
-        Ok(Operand::Str(self.cell_text(cell, s.optional_number)))
+        let reward = self.table.map_or("", |table| table.cell(s.row, 0));
+        if let Some(key) = self.input.and_then(|input| input.killstreak_key(reward)) {
+            return Ok(Operand::Str(format!(
+                "Press {key} for {}",
+                crate::killstreaks::title(reward)
+            )));
+        }
+        if self.input.is_some_and(|input| input.killstreak_shortcuts) {
+            let mut reward_prompt = false;
+            hud_iw4::replace_directive(&self.loc(cell), |command| {
+                reward_prompt |= command == "+actionslot 4";
+                String::new()
+            });
+            if reward_prompt {
+                return Ok(Operand::Str("Reward unavailable".into()));
+            }
+        }
+        Ok(Operand::Str(self.cell_text(
+            cell,
+            s.optional_number,
+            reward,
+        )))
     }
     fn splash_material(&self, slot: i32) -> Result<Operand, ExprError> {
         let Some(s) = self.slot(slot) else {

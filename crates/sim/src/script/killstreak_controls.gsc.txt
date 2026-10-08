@@ -1,0 +1,47 @@
+configure(a, b, c)
+{
+    if (!isDefined(self.perks))
+        return;
+    self maps\mp\gametypes\_class::setKillstreaks(a, b, c);
+    if (!isDefined(self.pers) || !isDefined(self.pers["cur_kill_streak"]))
+        return;
+    count = self.pers["cur_kill_streak"];
+    self.pers["lastEarnedStreak"] = undefined;
+    foreach (cost, name in self.killStreaks)
+    {
+        if (cost + level.killStreakMod <= count)
+            self.pers["lastEarnedStreak"] = name;
+    }
+    self.iw4l_reward_life = self.pers["deaths"];
+    self.iw4l_reward_count = count;
+}
+
+activate(index, name)
+{
+    self endon("disconnect");
+    if (!isAlive(self) || self maps\mp\_utility::isUsingRemote() || isDefined(self.selectingLocation))
+        return;
+    original = self.pers["killstreaks"];
+    entries = [];
+    foreach (reward in original)
+    {
+        if (isDefined(reward) && isDefined(reward.streakName))
+            entries[entries.size] = reward;
+    }
+    if (index < 0 || index >= entries.size || entries[index].streakName != name)
+        return;
+    ordered = [];
+    ordered[0] = entries[index];
+    next = 1;
+    for (i = 0; i < entries.size; i++)
+    {
+        if (i != index)
+        {
+            ordered[next] = entries[i];
+            next++;
+        }
+    }
+    self.pers["killstreaks"] = ordered;
+    self maps\mp\killstreaks\_killstreaks::giveOwnedKillstreakItem(true);
+    self switchToWeapon(maps\mp\killstreaks\_killstreaks::getKillstreakWeapon(name));
+}

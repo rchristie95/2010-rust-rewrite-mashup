@@ -273,6 +273,9 @@ impl NodeGrid {
 #[derive(Clone, Copy, Debug)]
 pub struct CullCamera {
     pub position: DVec3,
+    /// A bounded terrain view area around a remote camera's ground target.
+    /// Frustum tests and compile ordering still use the actual `position`.
+    pub terrain_center: Option<DVec3>,
     pub forward: Vec3,
     pub fov_degrees: f32,
     pub aspect: f32,
@@ -806,12 +809,17 @@ impl Sections {
     /// Positions the view area on the camera. Returns sections that left it
     /// and had meshes to release.
     pub fn reposition(&mut self, camera: &CullCamera) -> Vec<SectionPos> {
-        let block = camera.position.floor().as_ivec3();
+        let block = camera
+            .terrain_center
+            .unwrap_or(camera.position)
+            .floor()
+            .as_ivec3();
         let section = (block.x >> 4, block.y >> 4, block.z >> 4);
         let mut dropped = Vec::new();
         if section != self.camera_section {
             let old = self.camera_section;
             self.camera_section = section;
+            self.needs_full_update = true;
             let (cx, cz, vd) = (section.0, section.2, self.view_distance);
             if (section.0, section.2) != (old.0, old.2) {
                 // Only columns of the old area can have left the new one.
@@ -1103,7 +1111,12 @@ fn run_updates(graph: &mut Graph, area: Area, inputs: &Inputs, camera: &CullCame
             {
                 continue;
             }
-            if distant && !ray_visible(graph, area, pos, direction, eye, camera_center, diagonal) {
+            // An aerial camera's ray crosses air above the bounded ground
+            // graph. Its absence there cannot mean the terrain is occluded.
+            if distant
+                && camera.terrain_center.is_none()
+                && !ray_visible(graph, area, pos, direction, eye, camera_center, diagonal)
+            {
                 continue;
             }
             if let Some(existing) = graph.nodes.get_mut(next) {
@@ -1265,6 +1278,7 @@ mod tests {
     fn graph_spreads_only_through_compiled_or_empty_sections() {
         let camera = CullCamera {
             position: DVec3::new(8.0, 100.0, 8.0),
+            terrain_center: None,
             forward: Vec3::new(0.0, -0.2, -1.0).normalize(),
             fov_degrees: 70.0,
             aspect: 16.0 / 9.0,
@@ -1299,6 +1313,7 @@ mod tests {
     fn background_full_update_matches_the_synchronous_one() {
         let camera = CullCamera {
             position: DVec3::new(8.0, 100.0, 8.0),
+            terrain_center: None,
             forward: Vec3::new(0.0, -0.2, -1.0).normalize(),
             fov_degrees: 70.0,
             aspect: 16.0 / 9.0,
@@ -1342,6 +1357,7 @@ mod tests {
     fn moving_the_view_area_keeps_the_graph_inputs() {
         let camera_at = |x: f64| CullCamera {
             position: DVec3::new(x, 100.0, 8.0),
+            terrain_center: None,
             forward: Vec3::new(0.0, -0.2, -1.0).normalize(),
             fov_degrees: 70.0,
             aspect: 16.0 / 9.0,

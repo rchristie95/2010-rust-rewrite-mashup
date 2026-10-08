@@ -41,6 +41,7 @@ pub(crate) struct InventoryUi {
     /// The gun last asked for, until the player state holds it.
     pending_weapon: Option<u32>,
     last_selected: Option<usize>,
+    last_held: Option<u32>,
 }
 
 /// What the player holds and where it looks, for throwing items.
@@ -161,7 +162,18 @@ impl InventoryUi {
         let selected_gun = inventory.slots[*selected].as_ref().and_then(weapon_of);
         let changed = self.last_selected != Some(*selected);
         self.last_selected = Some(*selected);
-        if self.pending_weapon == Some(held) {
+        let entered_script_weapon = self.last_held != Some(held)
+            && held != 0
+            && !inventory
+                .slots
+                .iter()
+                .chain(inventory.crafting.iter())
+                .chain(std::iter::once(&inventory.cursor))
+                .any(|stack| stack.as_ref().and_then(weapon_of) == Some(held));
+        self.last_held = Some(held);
+        if self.pending_weapon == Some(held) || entered_script_weapon {
+            // A script raised a weapon outside the hotbar, such as a laptop.
+            // Drop stale requests before considering a new deliberate selection.
             self.pending_weapon = None;
         }
         if changed {

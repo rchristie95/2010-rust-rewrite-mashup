@@ -1,7 +1,6 @@
 use std::{fs, path::PathBuf};
 
 use bevy::{
-    audio::{AudioSink, AudioSinkPlayback, GlobalVolume, Volume},
     input::{
         ButtonInput,
         keyboard::KeyCode,
@@ -23,9 +22,6 @@ pub(crate) struct UserSettingsPersistence {
     path: Option<PathBuf>,
     last_payload: Option<String>,
 }
-
-#[derive(Resource)]
-pub(crate) struct AppliedMasterVolume(f32);
 
 pub(crate) fn load_user_settings(
     identity: Res<ui::LaunchIdentity>,
@@ -218,40 +214,12 @@ pub(crate) fn sync_binding_view(
 
 pub(crate) fn apply_master_volume(
     settings: Res<frame::GameSettings>,
-    mut global: ResMut<GlobalVolume>,
-    mut sinks: Query<(Entity, &mut AudioSink, &bevy::audio::PlaybackSettings)>,
-    mut muted_volumes: Local<std::collections::HashMap<Entity, f32>>,
-    applied: Option<ResMut<AppliedMasterVolume>>,
-    mut commands: Commands,
+    audio: Option<Res<audio::AudioRuntime>>,
 ) {
-    if !settings.is_changed() {
-        return;
-    }
-    let previous = applied.as_ref().map_or(1.0, |value| value.0);
-    let next = settings.master_volume;
-    global.volume = Volume::Linear(next);
-    muted_volumes.retain(|entity, _| sinks.contains(*entity));
-    for (entity, mut sink, playback) in &mut sinks {
-        let base = if previous > f32::EPSILON {
-            sink.volume().to_linear() / previous
-        } else {
-            muted_volumes
-                .get(&entity)
-                .copied()
-                .unwrap_or(playback.volume.to_linear())
-        };
-        if next == 0.0 {
-            muted_volumes.insert(entity, base);
-        }
-        sink.set_volume(Volume::Linear(base * next));
-    }
-    if next > 0.0 {
-        muted_volumes.clear();
-    }
-    if let Some(mut applied) = applied {
-        applied.0 = next;
-    } else {
-        commands.insert_resource(AppliedMasterVolume(next));
+    if settings.is_changed()
+        && let Some(audio) = audio
+    {
+        audio.set_master_volume(settings.master_volume);
     }
 }
 
@@ -327,7 +295,7 @@ pub(crate) fn save_user_settings(
     persistence.last_payload = Some(payload);
 }
 
-fn settings_path(artifacts: &std::path::Path) -> Option<PathBuf> {
+pub(crate) fn settings_path(artifacts: &std::path::Path) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("IW4L_SETTINGS_PATH") {
         return Some(PathBuf::from(path));
     }
@@ -375,12 +343,18 @@ fn serialize_settings(settings: &frame::GameSettings, binds: &KeyBinds) -> Strin
         format!("master_volume={:.3}", settings.master_volume),
         format!("brightness={:.3}", settings.brightness),
         format!("fov={:.0}", settings.fov),
+        format!("third_person={}", settings.third_person),
         format!("shadows={}", settings.shadows),
         format!("depth_of_field={}", settings.depth_of_field),
         format!("bloom={}", settings.bloom),
         format!("sensitivity={:.3}", settings.sensitivity),
         format!("invert_mouse={}", settings.invert_mouse),
         format!("player_name={safe_name}"),
+        format!("killstreaks={}", settings.killstreaks.join("|")),
+        format!(
+            "minecraft_all_killstreaks={}",
+            settings.minecraft_all_killstreaks
+        ),
         format!("pad_layout={}", settings.pad_layout),
         format!("pad_stick_layout={}", settings.pad_stick_layout),
         format!("pad_sensitivity_preset={}", settings.pad_sensitivity_preset),
@@ -397,8 +371,9 @@ fn serialize_settings(settings: &frame::GameSettings, binds: &KeyBinds) -> Strin
         format!("pad_vibration={}", settings.pad_vibration),
         format!("pad_deadzone_left={:.2}", settings.pad_deadzone_left),
         format!("pad_deadzone_right={:.2}", settings.pad_deadzone_right),
-        "unbindall".to_owned(),
     ];
+    lines.extend(crate::game_folders::serialize_game_folders(settings));
+    lines.push("unbindall".to_owned());
     lines.extend(binds.list_lines());
     lines.push(String::new());
     lines.join("\n")
@@ -439,6 +414,7 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
                     settings.vsync = value;
                 }
             }
+            "third_person" => parse_into(value, &mut settings.third_person),
             "fov" => {
                 if let Ok(v) = value.parse() {
                     settings.fov = v;
@@ -480,6 +456,17 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
                 }
             }
             "player_name" => settings.player_name = value.to_owned(),
+            "killstreaks" => {
+                let names: Vec<_> = value.split('|').map(str::to_owned).collect();
+                if let Ok(names) = names.try_into() {
+                    settings.killstreaks = names;
+                }
+            }
+            "minecraft_all_killstreaks" => {
+                if let Ok(enabled) = value.parse() {
+                    settings.minecraft_all_killstreaks = enabled;
+                }
+            }
             "pad_layout" => parse_into(value, &mut settings.pad_layout),
             "pad_stick_layout" => parse_into(value, &mut settings.pad_stick_layout),
             "pad_sensitivity" => {
@@ -499,6 +486,7 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
             "pad_vibration" => parse_into(value, &mut settings.pad_vibration),
             "pad_deadzone_left" => parse_into(value, &mut settings.pad_deadzone_left),
             "pad_deadzone_right" => parse_into(value, &mut settings.pad_deadzone_right),
+            _ if crate::game_folders::parse_game_folder(key, value, settings) => {}
             _ => warn!("ignored unknown setting `{key}`"),
         }
     }
@@ -516,6 +504,22 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
         && !binds.iter().any(|(_, id)| id == 21)
     {
         binds.set(BindButton::Key(KeyCode::Digit4), 21);
+    }
+    if binds.binding_name(BindButton::Key(KeyCode::KeyH)) == Some("+actionslot 4") {
+        binds.clear_button(BindButton::Key(KeyCode::KeyH));
+    }
+    if binds.binding_name(BindButton::Key(KeyCode::Digit4)) == Some("+actionslot 4") {
+        binds.clear_button(BindButton::Key(KeyCode::Digit4));
+    }
+    for key in [KeyCode::ControlLeft, KeyCode::ControlRight] {
+        if let Some(id) = binds.get(BindButton::Key(key))
+            && input_iw4::command_name(id) == Some("+prone")
+        {
+            binds.clear_button(BindButton::Key(key));
+            if binds.get(BindButton::Key(KeyCode::KeyZ)).is_none() {
+                binds.set(BindButton::Key(KeyCode::KeyZ), id);
+            }
+        }
     }
 }
 
@@ -553,6 +557,13 @@ pub(crate) fn native_menu_settings(
                 }
             }
             "ui_player_name" => settings.player_name = value.clone(),
+            "ui_sensitivity" => {
+                if let Ok(v) = value.parse::<f32>()
+                    && v.is_finite()
+                {
+                    settings.sensitivity = v;
+                }
+            }
             "ui_fov" => {
                 if let Ok(v) = value.parse::<f32>() {
                     settings.fov = v;
@@ -565,6 +576,7 @@ pub(crate) fn native_menu_settings(
                     settings.brightness = v;
                 }
             }
+            "ui_third_person" | "cg_thirdPerson" => settings.third_person = value == "1",
             "ui_shadows" => settings.shadows = value == "1",
             "ui_dof" => settings.depth_of_field = value == "1",
             "ui_bloom" => settings.bloom = value == "1",
@@ -602,6 +614,10 @@ pub(crate) fn native_menu_settings(
     dvars.set("ui_volume", settings.master_volume.to_string());
     dvars.set("ui_brightness", settings.brightness.to_string());
     dvars.set("ui_fov", settings.fov.to_string());
+    dvars.set("ui_sensitivity", settings.sensitivity.to_string());
+    for name in ["ui_third_person", "cg_thirdPerson"] {
+        dvars.set(name, if settings.third_person { "1" } else { "0" });
+    }
     dvars.set("ui_player_name", settings.player_name.clone());
     dvars.set("ui_shadows", if settings.shadows { "1" } else { "0" });
     dvars.set("ui_dof", if settings.depth_of_field { "1" } else { "0" });

@@ -2,7 +2,7 @@
 //! world around the local player, whose chunks become block collision and
 //! whose section meshes go to the renderer. The world sits with its player
 //! spawn at map origin, a block to `sim::voxel::BLOCK` map units.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 
 use bevy::input::gamepad::GamepadButton;
@@ -126,6 +126,7 @@ struct Runtime {
     /// Boxes of each shape id, to reuse an id for a repeated shape.
     shape_ids: HashMap<Vec<[u32; 6]>, u16>,
     was_alive: bool,
+    retained_collision: HashSet<(i32, i32)>,
 }
 
 /// The player's MW2 body stands in the inventory's character window, on a
@@ -151,15 +152,28 @@ pub(crate) fn place_inventory_puppet(
     if !(ui.active && ui.inventory_open && alive) {
         return;
     }
-    let (Some([cx, cy, box_w, box_h]), Ok(window), Ok(camera), Ok(Projection::Perspective(lens))) =
-        (ui.character_box, windows.single(), cameras.single(), lenses.single())
-    else {
+    let (Some([cx, cy, box_w, box_h]), Ok(window), Ok(camera), Ok(Projection::Perspective(lens))) = (
+        ui.character_box,
+        windows.single(),
+        cameras.single(),
+        lenses.single(),
+    ) else {
         return;
     };
     let (w, h) = (window.width().max(1.0), window.height().max(1.0));
     let tan_v = (lens.fov * 0.5).tan();
-    let tan_h = tan_v * if lens.aspect_ratio > 1e-3 { lens.aspect_ratio } else { w / h };
-    let (eye, fwd, right, up) = (camera.translation, *camera.forward(), *camera.right(), *camera.up());
+    let tan_h = tan_v
+        * if lens.aspect_ratio > 1e-3 {
+            lens.aspect_ratio
+        } else {
+            w / h
+        };
+    let (eye, fwd, right, up) = (
+        camera.translation,
+        *camera.forward(),
+        *camera.right(),
+        *camera.up(),
+    );
     // A point `distance` along the view at a window pixel.
     let at = |px: f32, py: f32, distance: f32| {
         let (nx, ny) = (px / w * 2.0 - 1.0, 1.0 - py / h * 2.0);
@@ -191,7 +205,12 @@ pub(crate) fn place_inventory_puppet(
         let b = sim::voxel::to_block(view.origin, p.to_array());
         [b[0] as f32, b[1] as f32, b[2] as f32]
     };
-    view.backdrop = Some([corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)]);
+    view.backdrop = Some([
+        corner(-1.0, -1.0),
+        corner(1.0, -1.0),
+        corner(1.0, 1.0),
+        corner(-1.0, 1.0),
+    ]);
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -209,6 +228,7 @@ pub(crate) fn register(app: &mut App) {
         .add_systems(
             Update,
             update
+                .after(crate::sync_camera_from_presented)
                 .after(frame::PresentedPublished)
                 .in_set(frame::ClientSet::Present),
         );
@@ -235,7 +255,8 @@ fn load(seed: i64) -> Result<Loaded, String> {
         DimensionEnvironment::load(&registries, Dimension::Overworld.dimension_type())?;
     let celestial = Arc::new(celestial_image(&packs).map_err(|e| e.to_string())?);
     let cloud_mask = CloudMask::from_pack(&packs).ok();
-    let crack_texture = Arc::new(crate::minecraft_mining::crack_strip(&packs).map_err(|e| e.to_string())?);
+    let crack_texture =
+        Arc::new(crate::minecraft_mining::crack_strip(&packs).map_err(|e| e.to_string())?);
     Ok(Loaded {
         stream,
         scene,
@@ -269,8 +290,7 @@ fn celestial_image(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
         if let Some(bytes) = packs.texture(&id)? {
             let img =
                 image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?.to_rgba8();
-            let tile =
-                image::imageops::resize(&img, 32, 32, image::imageops::FilterType::Nearest);
+            let tile = image::imageops::resize(&img, 32, 32, image::imageops::FilterType::Nearest);
             image::imageops::replace(&mut celestial, &tile, (index as i64) * 32, 0);
         }
     }
@@ -279,8 +299,18 @@ fn celestial_image(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
 
 /// A controller trigger, held or just pressed: with a block or an empty hand
 /// the right trigger mines and the left places, as the mouse buttons do.
-fn pad_trigger(pad: Option<&bevy::input::gamepad::Gamepad>, button: GamepadButton, just: bool) -> bool {
-    pad.is_some_and(|pad| if just { pad.just_pressed(button) } else { pad.pressed(button) })
+fn pad_trigger(
+    pad: Option<&bevy::input::gamepad::Gamepad>,
+    button: GamepadButton,
+    just: bool,
+) -> bool {
+    pad.is_some_and(|pad| {
+        if just {
+            pad.just_pressed(button)
+        } else {
+            pad.pressed(button)
+        }
+    })
 }
 
 fn seed() -> i64 {
@@ -314,14 +344,17 @@ fn update(
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
-    (skate, cameras, gamepads, active_pad): (
+    (skate, cameras, lenses, gamepads, active_pad): (
         Res<frame::SkateMode>,
         Query<&Transform, With<render_scene::FlyCamera>>,
+        Query<&Projection, With<render_scene::FpvLens>>,
         Query<&bevy::input::gamepad::Gamepad>,
         Option<Res<frame::ActivePad>>,
     ),
 ) {
-    let pad = active_pad.and_then(|active| active.0).and_then(|entity| gamepads.get(entity).ok());
+    let pad = active_pad
+        .and_then(|active| active.0)
+        .and_then(|entity| gamepads.get(entity).ok());
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
     }
@@ -338,6 +371,7 @@ fn update(
                     let _ = send.send(load(seed));
                 });
             runtime.loading = Some(receive);
+            ui.loading_world = true;
             view.active = true;
         }
     }
@@ -358,7 +392,10 @@ fn update(
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
                 runtime.sounds = Some(crate::minecraft_sounds::Sounds::load(&world.packs));
-                runtime.entities = Some(crate::minecraft_entities::Entities::new(&world.stream, world.seed));
+                runtime.entities = Some(crate::minecraft_entities::Entities::new(
+                    &world.stream,
+                    world.seed,
+                ));
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -389,6 +426,7 @@ fn update(
                 runtime.shapes.clear();
                 runtime.shape_ids.clear();
                 runtime.was_alive = false;
+                runtime.retained_collision.clear();
             }
             Err(error) => {
                 diag::warn!(World, "Minecraft world failed to load: {error}");
@@ -403,6 +441,7 @@ fn update(
         shapes,
         shape_ids,
         was_alive,
+        retained_collision,
         day,
         environment_accumulator,
         environment_primed,
@@ -431,16 +470,14 @@ fn update(
         return;
     };
 
-    // Every spawn lands on the Minecraft spawn once its ground exists.
+    let remote_view = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .and_then(|meta| meta.remote_missile)
+        .is_some_and(|link| link.unlink_at_ms.is_none());
+
     let alive = ps.pm_type == 0;
-    let spawn_chunk = ((origin[0].floor() as i32) >> 4, (origin[2].floor() as i32) >> 4);
-    if alive && !*was_alive && world.scene.generated_chunk(spawn_chunk).is_some() {
-        // Retried each frame until the authority has the player to move.
-        if authority.0.teleport(local.0, [0.0, 0.0, 0.0]) {
-            diag::info!(World, "Minecraft spawn: moved to the world spawn");
-            *was_alive = true;
-        }
-    } else if !alive {
+    if !alive {
         *was_alive = false;
     }
 
@@ -450,7 +487,54 @@ fn update(
         feet[1].floor() as i32,
         feet[2].floor() as i32,
     );
-    let (loaded, forgotten) = world.stream.server_tick(block, &mut world.scene);
+    let player_chunk = (block.0 >> 4, block.2 >> 4);
+    retained_collision.retain(|&(x, z)| {
+        if (x - player_chunk.0).abs() > 1 || (z - player_chunk.1).abs() > 1 {
+            sim::voxel::remove_chunk(x, z);
+            false
+        } else {
+            true
+        }
+    });
+    // The narrow aerial view looks hundreds of blocks down and ahead. Track
+    // the terrain under that ray, while retaining the real eye for rendering.
+    let remote_terrain_center = cameras.iter().next().filter(|_| remote_view).map(|camera| {
+        let at = sim::voxel::to_block(origin, camera.translation.to_array());
+        let at = glam::DVec3::from_array(at);
+        let ahead = camera.rotation * Vec3::NEG_Z;
+        let direction =
+            glam::DVec3::new(f64::from(ahead.x), f64::from(ahead.z), -f64::from(ahead.y));
+        let ground_y = feet[1] + 1.62;
+        // The frustum's far plane is 1024 blocks. A near-horizontal ray
+        // cannot require terrain beyond it or an unbounded view area.
+        let distance = if direction.y < -0.001 && at.y > ground_y {
+            ((ground_y - at.y) / direction.y).clamp(0.0, 1024.0)
+        } else {
+            0.0
+        };
+        let target = at + direction * distance;
+        glam::DVec3::new(target.x, ground_y, target.z)
+    });
+    // Admission and respawn need the nominal spawn's physical floor first,
+    // even if the previous life died beyond that area's streamed chunks.
+    let stream_block = if !*was_alive {
+        (
+            origin[0].floor() as i32,
+            origin[1].floor() as i32,
+            origin[2].floor() as i32,
+        )
+    } else {
+        remote_terrain_center
+            .map(|at| {
+                (
+                    at.x.floor() as i32,
+                    at.y.floor() as i32,
+                    at.z.floor() as i32,
+                )
+            })
+            .unwrap_or(block)
+    };
+    let (loaded, forgotten) = world.stream.server_tick(stream_block, &mut world.scene);
     for chunk in loaded {
         let blocks = &world.registries.blocks;
         let (min_y, height) = (chunk.min_y(), chunk.height());
@@ -472,8 +556,10 @@ fn update(
                         if boxes.is_empty() {
                             return 0;
                         }
-                        let key: Vec<[u32; 6]> =
-                            boxes.iter().map(|b| b.map(|v| (v as f32).to_bits())).collect();
+                        let key: Vec<[u32; 6]> = boxes
+                            .iter()
+                            .map(|b| b.map(|v| (v as f32).to_bits()))
+                            .collect();
                         if let Some(&id) = shape_ids.get(&key) {
                             return id;
                         }
@@ -499,12 +585,43 @@ fn update(
                 shapes: ids,
             },
         );
+        retained_collision.remove(&(chunk.pos.x, chunk.pos.z));
     }
     for pos in forgotten {
-        sim::voxel::remove_chunk(pos.x, pos.z);
+        let key = (pos.x, pos.z);
+        let supports_player = (remote_view || retained_collision.contains(&key))
+            && (pos.x - player_chunk.0).abs() <= 1
+            && (pos.z - player_chunk.1).abs() <= 1;
+        if supports_player {
+            retained_collision.insert(key);
+        } else {
+            retained_collision.remove(&key);
+            sim::voxel::remove_chunk(pos.x, pos.z);
+        }
         if let Some(entities) = entities.as_mut() {
             entities.unload_chunk(pos);
         }
+    }
+
+    // Generated spawn height is only a hint. Uploaded collision must prove
+    // a clear standing box and a walkable floor before admitting a class.
+    let spawn_at = if !*was_alive {
+        sim::voxel::spawn_origin()
+    } else {
+        None
+    };
+    ui.loading_world = !*was_alive && spawn_at.is_none();
+    if alive
+        && !*was_alive
+        && let Some(at) = spawn_at
+        && authority.0.teleport(local.0, at)
+    {
+        diag::info!(
+            World,
+            "Minecraft spawn: moved to clear world spawn {:?}",
+            at
+        );
+        *was_alive = true;
     }
 
     // Minecraft's yaw: 0 facing +Z (map -Y), turning towards -X.
@@ -524,12 +641,21 @@ fn update(
     if let Some(last) = steps.last.filter(|_| alive) {
         let horizontal = ((feet[0] - last[0]).hypot(feet[2] - last[2]) * 0.6) as f32;
         let block_at = |dy: f64| {
-            let pos = (feet[0].floor() as i32, (feet[1] - dy).floor() as i32, feet[2].floor() as i32);
-            minecraft_terrain::scene::Scene::block(&world.scene, pos).cloned().map(|b| (pos, b))
+            let pos = (
+                feet[0].floor() as i32,
+                (feet[1] - dy).floor() as i32,
+                feet[2].floor() as i32,
+            );
+            minecraft_terrain::scene::Scene::block(&world.scene, pos)
+                .cloned()
+                .map(|b| (pos, b))
         };
         let under = block_at(0.2);
         let centre = |pos: (i32, i32, i32)| {
-            Vec3::from_array(sim::voxel::to_map(origin, [pos.0 as f64 + 0.5, pos.1 as f64 + 1.0, pos.2 as f64 + 0.5]))
+            Vec3::from_array(sim::voxel::to_map(
+                origin,
+                [pos.0 as f64 + 0.5, pos.1 as f64 + 1.0, pos.2 as f64 + 0.5],
+            ))
         };
         if on_ground && horizontal < 2.0 {
             steps.move_dist += horizontal;
@@ -543,8 +669,15 @@ fn update(
                     p == "snow" || p.ends_with("_carpet") || p == "moss_carpet"
                 });
                 let (pos, block) = inside.as_ref().map_or((*pos, block), |(p, b)| (*p, b));
-                if let (Some(sounds), Some(kind)) = (sounds.as_mut(), world.scene.sound_type(block)) {
-                    sounds.play(&world.packs, &kind.step, Some(centre(pos)), kind.volume * 0.15, kind.pitch);
+                if let (Some(sounds), Some(kind)) = (sounds.as_mut(), world.scene.sound_type(block))
+                {
+                    sounds.play(
+                        &world.packs,
+                        &kind.step,
+                        Some(centre(pos)),
+                        kind.volume * 0.15,
+                        kind.pitch,
+                    );
                 }
             }
         }
@@ -554,12 +687,22 @@ fn update(
                 if fall > 3.0
                     && let Some(sounds) = sounds.as_mut()
                 {
-                    let event = if fall > 7.0 { "minecraft:entity.player.big_fall" } else { "minecraft:entity.player.small_fall" };
+                    let event = if fall > 7.0 {
+                        "minecraft:entity.player.big_fall"
+                    } else {
+                        "minecraft:entity.player.small_fall"
+                    };
                     sounds.play(&world.packs, event, None, 1.0, 1.0);
                     if let Some((pos, block)) = under.as_ref()
                         && let Some(kind) = world.scene.sound_type(block)
                     {
-                        sounds.play(&world.packs, &kind.fall, Some(centre(*pos)), kind.volume * 0.5, kind.pitch * 0.75);
+                        sounds.play(
+                            &world.packs,
+                            &kind.fall,
+                            Some(centre(*pos)),
+                            kind.volume * 0.5,
+                            kind.pitch * 0.75,
+                        );
                     }
                 }
             }
@@ -579,11 +722,15 @@ fn update(
         }
     }
     let holding = entities.as_ref().is_some_and(|e| {
-        e.inventory.slots[e.selected].as_ref().is_none_or(|s| crate::minecraft_inventory::weapon_of(s).is_none())
+        e.inventory.slots[e.selected]
+            .as_ref()
+            .is_none_or(|s| crate::minecraft_inventory::weapon_of(s).is_none())
     });
     ui.holding_item = alive && holding;
     ui.empty_hand = ui.holding_item
-        && entities.as_ref().is_some_and(|e| e.inventory.slots[e.selected].is_none());
+        && entities
+            .as_ref()
+            .is_some_and(|e| e.inventory.slots[e.selected].is_none());
     hand.clock += dt_hand;
     let hand_ticks = (hand.clock / TICK_SECONDS) as u32;
     hand.clock -= f64::from(hand_ticks) * TICK_SECONDS;
@@ -597,14 +744,35 @@ fn update(
         player.selected = entities.selected;
         let eye_block = glam::DVec3::from_array(feet) + glam::DVec3::Y * 1.62;
         let look = {
-            let (yaw, pitch) = (f64::from(mc_yaw).to_radians(), f64::from(ps.viewangles[0]).to_radians());
-            glam::DVec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos())
+            let (yaw, pitch) = (
+                f64::from(mc_yaw).to_radians(),
+                f64::from(ps.viewangles[0]).to_radians(),
+            );
+            glam::DVec3::new(
+                -yaw.sin() * pitch.cos(),
+                -pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            )
         };
-        if buttons.just_pressed(MouseButton::Left) || pad_trigger(pad, GamepadButton::RightTrigger2, true) {
+        if buttons.just_pressed(MouseButton::Left)
+            || pad_trigger(pad, GamepadButton::RightTrigger2, true)
+        {
             hand.swing = Some(0.0);
-            entities.punch(eye_block, look, mc_yaw);
+            if let Some(meta) = authority.0.client_meta(local.0) {
+                entities.punch(
+                    eye_block,
+                    look,
+                    mc_yaw,
+                    sim::voxel::MobAttackCredit {
+                        client: local.0,
+                        life: meta.life_sequence,
+                    },
+                );
+            }
         }
-        if buttons.pressed(MouseButton::Left) || pad_trigger(pad, GamepadButton::RightTrigger2, false) {
+        if buttons.pressed(MouseButton::Left)
+            || pad_trigger(pad, GamepadButton::RightTrigger2, false)
+        {
             for _ in 0..hand_ticks {
                 if let Some(hit) = player.target(&world.scene, 4.5) {
                     // A hand mines as vanilla's `getDestroyProgress`: a
@@ -613,15 +781,21 @@ fn update(
                         block: [hit.pos.0, hit.pos.1, hit.pos.2],
                         damage: 160.0 / 30.0,
                     });
-                    if hand.swing.is_none_or(|t| t >= crate::minecraft_hand::SWING_TICKS * 0.5) {
+                    if hand
+                        .swing
+                        .is_none_or(|t| t >= crate::minecraft_hand::SWING_TICKS * 0.5)
+                    {
                         hand.swing = Some(0.0);
                     }
                 }
             }
         }
         hand.place_delay = hand.place_delay.saturating_sub(hand_ticks);
-        let place = (buttons.just_pressed(MouseButton::Right) || pad_trigger(pad, GamepadButton::LeftTrigger2, true))
-            || ((buttons.pressed(MouseButton::Right) || pad_trigger(pad, GamepadButton::LeftTrigger2, false)) && hand.place_delay == 0);
+        let place = (buttons.just_pressed(MouseButton::Right)
+            || pad_trigger(pad, GamepadButton::LeftTrigger2, true))
+            || ((buttons.pressed(MouseButton::Right)
+                || pad_trigger(pad, GamepadButton::LeftTrigger2, false))
+                && hand.place_delay == 0);
         if place {
             hand.place_delay = 4;
             if let Some(pos) = player.place_selected(
@@ -655,7 +829,10 @@ fn update(
                             if boxes.is_empty() {
                                 return 0;
                             }
-                            let key: Vec<[u32; 6]> = boxes.iter().map(|b| b.map(|v| (v as f32).to_bits())).collect();
+                            let key: Vec<[u32; 6]> = boxes
+                                .iter()
+                                .map(|b| b.map(|v| (v as f32).to_bits()))
+                                .collect();
                             if let Some(&id) = shape_ids.get(&key) {
                                 return id;
                             }
@@ -670,10 +847,18 @@ fn update(
                     world.stream.mark_edited(&world.scene, &[pos]);
                     entities.placed(&world.scene, pos);
                     hand.swing = Some(0.0);
-                    if let (Some(sounds), Some(kind)) = (sounds.as_mut(), world.scene.sound_type(&block)) {
+                    if let (Some(sounds), Some(kind)) =
+                        (sounds.as_mut(), world.scene.sound_type(&block))
+                    {
                         let centre = [pos.0 as f64 + 0.5, pos.1 as f64 + 0.5, pos.2 as f64 + 0.5];
                         let at = Vec3::from_array(sim::voxel::to_map(origin, centre));
-                        sounds.play(&world.packs, &kind.place, Some(at), (kind.volume + 1.0) / 2.0, kind.pitch * 0.8);
+                        sounds.play(
+                            &world.packs,
+                            &kind.place,
+                            Some(at),
+                            (kind.volume + 1.0) / 2.0,
+                            kind.pitch * 0.8,
+                        );
                     }
                 }
             }
@@ -687,8 +872,14 @@ fn update(
         .partition(|event| matches!(event, sim::voxel::VoxelEvent::MobShot { .. }));
     if let Some(entities) = entities.as_mut() {
         for shot in mob_shots {
-            if let sim::voxel::VoxelEvent::MobShot { key, damage, from } = shot {
-                entities.shoot(key, damage, from, mc_yaw);
+            if let sim::voxel::VoxelEvent::MobShot {
+                key,
+                damage,
+                from,
+                credit,
+            } = shot
+            {
+                entities.shoot(key, damage, from, mc_yaw, credit);
             }
         }
     }
@@ -704,13 +895,29 @@ fn update(
                     if let Some(kind) = minecraft_terrain::scene::Scene::block(&world.scene, pos)
                         .and_then(|b| world.scene.sound_type(b))
                     {
-                        let centre = [block[0] as f64 + 0.5, block[1] as f64 + 0.5, block[2] as f64 + 0.5];
-                        sounds.play(&world.packs, &kind.hit, Some(at(centre)), (kind.volume + 1.0) / 4.0, kind.pitch * 0.5);
+                        let centre = [
+                            block[0] as f64 + 0.5,
+                            block[1] as f64 + 0.5,
+                            block[2] as f64 + 0.5,
+                        ];
+                        sounds.play(
+                            &world.packs,
+                            &kind.hit,
+                            Some(at(centre)),
+                            (kind.volume + 1.0) / 4.0,
+                            kind.pitch * 0.5,
+                        );
                     }
                 }
                 sim::voxel::VoxelEvent::Explosion { center } => {
                     let pitch = (1.0 + (sounds.random() - sounds.random()) * 0.2) * 0.7;
-                    sounds.play(&world.packs, "minecraft:entity.generic.explode", Some(at(center)), 4.0, pitch);
+                    sounds.play(
+                        &world.packs,
+                        "minecraft:entity.generic.explode",
+                        Some(at(center)),
+                        4.0,
+                        pitch,
+                    );
                 }
                 sim::voxel::VoxelEvent::MobShot { .. } | sim::voxel::VoxelEvent::Ray { .. } => {}
             }
@@ -734,7 +941,13 @@ fn update(
             }
             if let Some(kind) = world.scene.sound_type(block) {
                 let centre = [pos.0 as f64 + 0.5, pos.1 as f64 + 0.5, pos.2 as f64 + 0.5];
-                sounds.play(&world.packs, &kind.break_sound, Some(at(centre)), (kind.volume + 1.0) / 2.0, kind.pitch * 0.8);
+                sounds.play(
+                    &world.packs,
+                    &kind.break_sound,
+                    Some(at(centre)),
+                    (kind.volume + 1.0) / 2.0,
+                    kind.pitch * 0.8,
+                );
             }
         }
     }
@@ -744,36 +957,68 @@ fn update(
         entities.drop_blocks(&broken);
     }
 
-    let eye = sim::voxel::to_block(origin, [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current]);
+    let eye = sim::voxel::to_block(
+        origin,
+        [
+            ps.origin[0],
+            ps.origin[1],
+            ps.origin[2] + ps.view_height_current,
+        ],
+    );
     let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
-    let map_forward = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin()];
+    let map_forward = [
+        pitch.cos() * yaw.cos(),
+        pitch.cos() * yaw.sin(),
+        -pitch.sin(),
+    ];
     let forward = glam::Vec3::new(map_forward[0], map_forward[2], -map_forward[1]);
     let aspect = windows
         .single()
         .map(|w| w.width() / w.height().max(1.0))
         .unwrap_or(16.0 / 9.0);
-    // Culled from the camera that draws: the player's eye, or while
-    // skating the Skate camera (a frame behind, so with room to spare).
-    let skate_camera = cameras.iter().next().filter(|_| skate.active).map(|t| {
-        let at = sim::voxel::to_block(origin, t.translation.to_array());
-        let ahead = t.rotation * Vec3::NEG_Z;
-        (
-            glam::DVec3::new(at[0], at[1], at[2]),
-            glam::Vec3::new(ahead.x, ahead.z, -ahead.y).normalize_or(forward),
-        )
-    });
-    let (cull_at, cull_forward) = skate_camera.unwrap_or((glam::DVec3::new(eye[0], eye[1], eye[2]), forward));
+    let detached_camera = cameras
+        .iter()
+        .next()
+        .filter(|_| skate.active || remote_view)
+        .map(|t| {
+            let at = sim::voxel::to_block(origin, t.translation.to_array());
+            let ahead = t.rotation * Vec3::NEG_Z;
+            (
+                glam::DVec3::new(at[0], at[1], at[2]),
+                glam::Vec3::new(ahead.x, ahead.z, -ahead.y).normalize_or(forward),
+            )
+        });
+    let (cull_at, cull_forward) =
+        detached_camera.unwrap_or((glam::DVec3::new(eye[0], eye[1], eye[2]), forward));
+    let cull_fov = if remote_view {
+        lenses
+            .iter()
+            .find_map(|projection| match projection {
+                Projection::Perspective(lens) => Some(lens.fov.to_degrees()),
+                _ => None,
+            })
+            .unwrap_or(90.0)
+    } else if skate.active {
+        120.0
+    } else {
+        90.0
+    };
     let camera = CullCamera {
         position: cull_at,
+        terrain_center: remote_terrain_center,
         forward: cull_forward,
-        fov_degrees: if skate_camera.is_some() { 120.0 } else { 90.0 },
+        fov_degrees: cull_fov,
         aspect,
         yaw_degrees: (-cull_forward.x).atan2(cull_forward.z).to_degrees(),
         pitch_degrees: (-cull_forward.y).asin().to_degrees(),
     };
-    let update = world
-        .stream
-        .frame(&world.scene, &camera, FADE_MILLIS, &world.atlas, &world.packs);
+    let update = world.stream.frame(
+        &world.scene,
+        &camera,
+        FADE_MILLIS,
+        &world.atlas,
+        &world.packs,
+    );
     view.uploads.extend(update.uploads);
     view.removed.extend(update.removed);
     view.visible = update.visible;
@@ -789,7 +1034,14 @@ fn update(
     }
     // The minimap's picture, and its corners on the map.
     ui.minimap = minimap
-        .update(time.delta_secs_f64(), feet, &world.scene, &world.packs, &world.atlas, &mut images)
+        .update(
+            time.delta_secs_f64(),
+            feet,
+            &world.scene,
+            &world.packs,
+            &world.atlas,
+            &mut images,
+        )
         .map(|(image, [bx, bz])| {
             let corner = |x: i32, z: i32| {
                 let p = sim::voxel::to_map(origin, [f64::from(x), feet[1], f64::from(z)]);
@@ -815,6 +1067,9 @@ fn update(
         let bright_outside = world.environment.sky_light_level() > 11.0;
         let ticks_before = entities.client_ticks();
         let (changes, hits) = entities.tick(dt, day.ticks as i64, bright_outside, &player);
+        for (credit, kills) in entities.take_feedback() {
+            authority.0.confirm_mob_hit(credit, kills);
+        }
         let mob_ticks = (entities.client_ticks() - ticks_before) as u32;
         if !changes.is_empty() {
             let blocks = &world.registries.blocks;
@@ -827,7 +1082,10 @@ fn update(
                         if boxes.is_empty() {
                             return 0;
                         }
-                        let key: Vec<[u32; 6]> = boxes.iter().map(|b| b.map(|v| (v as f32).to_bits())).collect();
+                        let key: Vec<[u32; 6]> = boxes
+                            .iter()
+                            .map(|b| b.map(|v| (v as f32).to_bits()))
+                            .collect();
                         if let Some(&id) = shape_ids.get(&key) {
                             return id;
                         }
@@ -844,7 +1102,11 @@ fn update(
             world.stream.mark_edited(&world.scene, &positions);
         }
         for (amount, from) in hits {
-            sim::voxel::push_player_damage(local.0.0, amount, from.map(|b| sim::voxel::to_map(origin, b)));
+            sim::voxel::push_player_damage(
+                local.0.0,
+                amount,
+                from.map(|b| sim::voxel::to_map(origin, b)),
+            );
         }
         // The inventory: MW2 guns as items, the HUD's clicks, the hotbar's
         // gun, and what the HUD shows.
@@ -853,7 +1115,12 @@ fn update(
             .iter()
             .filter(|&&w| w > 0)
             .map(|&w| w as u32)
-            .filter(|&w| authority.0.weapon_combat_row(w).is_some_and(|facts| facts.inventory_type == 0))
+            .filter(|&w| {
+                authority
+                    .0
+                    .weapon_combat_row(w)
+                    .is_some_and(|facts| facts.inventory_type == 0)
+            })
             .collect();
         ui.active = alive;
         if !alive {
@@ -868,18 +1135,33 @@ fn update(
             pitch: ps.viewangles[0],
         };
         crate::minecraft_inventory::throw(&mut entities.world_items, thrown, &thrower);
-        ui.weapon_request = inventory_ui.weapon_request(&entities.inventory, &mut selected, ps.weapon as u32);
+        ui.weapon_request =
+            inventory_ui.weapon_request(&entities.inventory, &mut selected, ps.weapon as u32);
         entities.selected = selected;
-        inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
+        inventory_ui.publish(
+            &mut ui,
+            &entities.inventory,
+            selected,
+            &world.packs,
+            &mut images,
+        );
 
         if let Some(sounds) = sounds.as_mut() {
             for (event, position, volume, pitch) in std::mem::take(&mut entities.sounds) {
-                sounds.play(&world.packs, &event, Some(at(position.to_array())), volume, pitch);
+                sounds.play(
+                    &world.packs,
+                    &event,
+                    Some(at(position.to_array())),
+                    volume,
+                    pitch,
+                );
             }
         }
         // The held item in view; an empty hand is MW2's own hands.
         view.hand = Default::default();
-        let swing = hand.swing.map_or(0.0, |t| (t / crate::minecraft_hand::SWING_TICKS).clamp(0.0, 1.0));
+        let swing = hand.swing.map_or(0.0, |t| {
+            (t / crate::minecraft_hand::SWING_TICKS).clamp(0.0, 1.0)
+        });
         ui.hand_swing = swing;
         if ui.holding_item
             && !puppet.active
@@ -888,12 +1170,24 @@ fn update(
             let eye_light_at = glam::Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32);
             let display = minecraft_terrain::pack::ResourceId::parse(&stack.id)
                 .ok()
-                .and_then(|id| minecraft_terrain::model::item_first_person_transform(&world.packs, &id).ok())
+                .and_then(|id| {
+                    minecraft_terrain::model::item_first_person_transform(&world.packs, &id).ok()
+                })
                 .unwrap_or(glam::Mat4::IDENTITY);
             let pose = crate::minecraft_hand::item_pose(display, swing, 0.0);
-            let mesh = entities.held_item_mesh(&stack.id, pose, eye_light_at, &world.packs, &world.atlas, light);
-            let vertices: Vec<minecraft_terrain::mesh::SectionVertex> =
-                mesh.vertices.iter().map(minecraft_terrain::mesh::SectionVertex::from_vertex).collect();
+            let mesh = entities.held_item_mesh(
+                &stack.id,
+                pose,
+                eye_light_at,
+                &world.packs,
+                &world.atlas,
+                light,
+            );
+            let vertices: Vec<minecraft_terrain::mesh::SectionVertex> = mesh
+                .vertices
+                .iter()
+                .map(minecraft_terrain::mesh::SectionVertex::from_vertex)
+                .collect();
             view.hand = (bytemuck::cast_slice(&vertices).to_vec(), mesh.indices);
             // Reverse-Z with no far plane, as the scene's; 70 degrees up.
             let f = 1.0 / (35.0f32.to_radians()).tan();
@@ -920,7 +1214,10 @@ fn update(
             sky_darken,
         );
         let raw = |mesh: &minecraft_terrain::mesh::ChunkMesh| {
-            (bytemuck::cast_slice::<_, u8>(&mesh.vertices).to_vec(), mesh.indices.clone())
+            (
+                bytemuck::cast_slice::<_, u8>(&mesh.vertices).to_vec(),
+                mesh.indices.clone(),
+            )
         };
         view.entity_meshes = [
             raw(&meshes.models),
@@ -930,15 +1227,32 @@ fn update(
         ];
         let mesh = meshes.items;
         let (bytes, indices) = &mut view.particles;
-        let base = (bytes.len() / std::mem::size_of::<minecraft_terrain::mesh::SectionVertex>()) as u32;
-        let vertices: Vec<minecraft_terrain::mesh::SectionVertex> =
-            mesh.vertices.iter().map(minecraft_terrain::mesh::SectionVertex::from_vertex).collect();
+        let base =
+            (bytes.len() / std::mem::size_of::<minecraft_terrain::mesh::SectionVertex>()) as u32;
+        let vertices: Vec<minecraft_terrain::mesh::SectionVertex> = mesh
+            .vertices
+            .iter()
+            .map(minecraft_terrain::mesh::SectionVertex::from_vertex)
+            .collect();
         bytes.extend_from_slice(bytemuck::cast_slice(&vertices));
         indices.extend(mesh.indices.iter().map(|i| i + base));
     }
     view.cracks = mining.crack_mesh();
     day.advance(dt);
-    let eye_block = (eye[0].floor() as i32, eye[1].floor() as i32, eye[2].floor() as i32);
+    // Remote environment and fog originate at the missile, with enough
+    // depth to see the same bounded patch of ground its view area tracks.
+    let (eye, forward) = if remote_view {
+        (cull_at.to_array(), cull_forward)
+    } else {
+        (eye, forward)
+    };
+    let remote_fog_depth =
+        remote_terrain_center.map_or(0.0, |center| cull_at.distance(center) as f32);
+    let eye_block = (
+        eye[0].floor() as i32,
+        eye[1].floor() as i32,
+        eye[2].floor() as i32,
+    );
     view.eye_light = [
         f32::from(light.get(eye_block)),
         f32::from(light.get_block(eye_block)),
@@ -969,7 +1283,7 @@ fn update(
         rain_level: 0.0,
         thunder_level: 0.0,
     });
-    let render_distance = VIEW_DISTANCE as f32 * 16.0;
+    let render_distance = VIEW_DISTANCE as f32 * 16.0 + remote_fog_depth;
     let right = forward.cross(glam::Vec3::Y).normalize_or(glam::Vec3::X);
     let up = right.cross(forward).normalize_or(glam::Vec3::Y);
     let put = |v: glam::Vec3| [v.x, v.y, v.z, 0.0];
@@ -980,7 +1294,12 @@ fn update(
         put(up),
         [eye[0] as f32, eye[1] as f32, eye[2] as f32, 0.0],
         put(sky.sky),
-        [sky.fog.x, sky.fog.y, sky.fog.z, render_distance.min(sky.sky_fog_end)],
+        [
+            sky.fog.x,
+            sky.fog.y,
+            sky.fog.z,
+            render_distance.min(sky.sky_fog_end),
+        ],
         [
             sky.sky_light_color.x,
             sky.sky_light_color.y,
@@ -988,15 +1307,30 @@ fn update(
             sky.sky_light_factor,
         ],
         sky.sunset,
-        [sky.sun_direction.x, sky.sun_direction.y, sky.sun_direction.z, sky.rain_brightness],
-        [sky.moon_direction.x, sky.moon_direction.y, sky.moon_direction.z, sky.rain_brightness],
+        [
+            sky.sun_direction.x,
+            sky.sun_direction.y,
+            sky.sun_direction.z,
+            sky.rain_brightness,
+        ],
+        [
+            sky.moon_direction.x,
+            sky.moon_direction.y,
+            sky.moon_direction.z,
+            sky.rain_brightness,
+        ],
         // The brightness option at its default.
         [sky.cloud.x, sky.cloud.y, sky.cloud.z, 0.5],
         [aspect, 0.0, sky.star_brightness, sky.star_angle],
-        [sky.moon_phase as f32, (game_time as f32) * 0.03, 96.0, 160.0],
         [
-            sky.fog_start,
-            sky.fog_end,
+            sky.moon_phase as f32,
+            (game_time as f32) * 0.03,
+            96.0,
+            160.0,
+        ],
+        [
+            sky.fog_start + remote_fog_depth,
+            sky.fog_end + remote_fog_depth,
             render_distance - (render_distance / 10.0).clamp(4.0, 64.0),
             render_distance,
         ],
@@ -1032,8 +1366,7 @@ fn update(
     *light_volume_age += 1;
     let half = LIGHT_VOLUME / 2;
     let corner = [block.0 - half, block.1 - half, block.2 - half];
-    let moved =
-        light_volume_at.is_none_or(|at| (0..3).any(|k| (at[k] - corner[k]).abs() >= 4));
+    let moved = light_volume_at.is_none_or(|at| (0..3).any(|k| (at[k] - corner[k]).abs() >= 4));
     if moved || *light_volume_age >= 20 {
         *light_volume_age = 0;
         *light_volume_at = Some(corner);
@@ -1067,9 +1400,17 @@ fn update(
                     let at = index(x, y, z);
                     let (mut sky, mut block) = (raw[at], raw[at + 1]);
                     if sky == 0 && block == 0 {
-                        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+                        for (dx, dy, dz) in [
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
+                        ] {
                             let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                            if (0..n).contains(&nx) && (0..n).contains(&ny) && (0..n).contains(&nz) {
+                            if (0..n).contains(&nx) && (0..n).contains(&ny) && (0..n).contains(&nz)
+                            {
                                 let near = index(nx, ny, nz);
                                 sky = sky.max(raw[near]);
                                 block = block.max(raw[near + 1]);
@@ -1086,6 +1427,7 @@ fn update(
 }
 
 fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
+    runtime.retained_collision.clear();
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {
         sim::voxel::deactivate();
         view.active = false;
