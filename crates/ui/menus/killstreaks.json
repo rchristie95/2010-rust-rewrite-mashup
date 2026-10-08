@@ -11,7 +11,7 @@
         ],
         "open": [
           {
-            "Script": "focusFirst;"
+            "Script": "setFocus killstreak_settings;"
           }
         ]
       }
@@ -67,6 +67,18 @@
       },
       {
         "name": "video_fov_label",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_third_person",
+        "fields": {
+          "vis_exp": "0"
+        }
+      },
+      {
+        "name": "video_third_person_label",
         "fields": {
           "vis_exp": "0"
         }

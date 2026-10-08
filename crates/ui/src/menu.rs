@@ -137,6 +137,18 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
                 .iter()
                 .any(|item| item.text_key == "@MENU_RESET_SYSTEM_DEFAULTS")
         {
+            for item in &mut menu.items {
+                if item.item_type == 1
+                    && matches!(
+                        item.text_key.as_str(),
+                        "@MENU_VIDEO" | "@MENU_AUDIO" | "@MENU_CONTROLS"
+                    )
+                {
+                    item.handlers
+                        .action
+                        .insert(0, asset_game::MenuEvent::Script("close self;".into()));
+                }
+            }
             let mut multiplayer = settings_link;
             multiplayer.name = "multiplayer_settings".into();
             multiplayer.text_key = "@MENU_MULTIPLAYER_OPTIONS".into();
