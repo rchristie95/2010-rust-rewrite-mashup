@@ -68,6 +68,7 @@ pub(crate) fn consume_menu_binding(
     mut capture: ResMut<frame::UiBindingCapture>,
     mut binds: ResMut<KeyBinds>,
     mut view: ResMut<ui::BindingView>,
+    mut dvars: ResMut<frame::UiMenuDvars>,
 ) {
     capture.consumed_input = false;
     if capture.command.is_none() {
@@ -79,7 +80,16 @@ pub(crate) fn consume_menu_binding(
         .fold(None, |first, event| first.or_else(|| wheel_button(event.y)));
     let mut began = false;
     for intent in intents.read() {
-        if let Some(id) = input_iw4::command_id_lookup(&intent.command) {
+        if intent.command.starts_with("ui_skate_") {
+            capture.command = Some(intent.command.clone());
+            pending.id = None;
+            pending.armed = false;
+            began = true;
+            dvars.set(
+                "ui_skate_status",
+                "Press a numpad key. Esc cancels; Backspace clears.",
+            );
+        } else if let Some(id) = input_iw4::command_id_lookup(&intent.command) {
             capture.command = Some(intent.command.clone());
             pending.id = Some(id);
             view.listening = Some(id);
@@ -91,6 +101,18 @@ pub(crate) fn consume_menu_binding(
             pending.id = None;
             view.listening = None;
         }
+    }
+    if capture
+        .command
+        .as_deref()
+        .is_some_and(|command| command.starts_with("ui_skate_"))
+    {
+        if began || !pending.armed {
+            pending.armed = true;
+            return;
+        }
+        crate::skate_controls::capture_binding(&keys, &mut capture, &mut dvars);
+        return;
     }
     let Some(id) = pending.id else { return };
     if began || !pending.armed {
@@ -383,6 +405,7 @@ fn serialize_settings(settings: &frame::GameSettings, binds: &KeyBinds) -> Strin
 }
 
 fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut KeyBinds) {
+    let version = source.lines().next().map(str::trim);
     let mut bind_script = String::new();
     for raw in source.lines() {
         let line = raw.trim();
@@ -485,13 +508,10 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
             warn!("settings bind: {warning}");
         }
     }
-    if !binds.has_pad_binds() {
+    if version != Some("// IW4L user settings v2") && !binds.has_pad_binds() {
         binds.apply_pad_layout(usize::from(settings.pad_layout.min(4)));
     }
-    if source
-        .lines()
-        .next()
-        .is_some_and(|line| line.trim() == "// IW4L user settings v1")
+    if version == Some("// IW4L user settings v1")
         && binds.get(BindButton::Key(KeyCode::Digit4)).is_none()
         && !binds.iter().any(|(_, id)| id == 21)
     {

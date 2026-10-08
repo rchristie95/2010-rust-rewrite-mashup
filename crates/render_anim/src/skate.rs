@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use frame::{AppScreen, SkateMode};
 use skate_host::bridge::{CollisionBuilder, InputFrame, Pose, PreparedCollision, Session};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 enum Job {
     Activate(u64, Vec3, f32, f32),
@@ -14,8 +15,8 @@ enum Job {
 }
 enum Reply {
     Ready,
-    Activated(u64, Pose, u128),
-    Pose(u64, Pose),
+    Activated(u64, Pose, u128, Instant),
+    Pose(u64, Pose, Instant),
     Error(String),
 }
 #[derive(Resource, Default)]
@@ -31,6 +32,7 @@ struct Host {
     previous_buttons: u16,
     input_suspended: bool,
     logged_tick: u64,
+    last_pose_published: Option<Instant>,
 }
 
 pub fn register(app: &mut App) {
@@ -155,7 +157,8 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
                 // the blocks change.
                 let builder = session.collision_builder();
                 let (build_send, build_jobs) = mpsc::channel::<Vec3>();
-                let (built_send, built) = mpsc::channel::<(u64, Vec3, Result<(PreparedCollision, usize), String>)>();
+                let (built_send, built) =
+                    mpsc::channel::<(u64, Vec3, Result<(PreparedCollision, usize), String>)>();
                 std::thread::Builder::new()
                     .name("iw4l-skate-blocks".into())
                     .spawn(move || {
@@ -190,7 +193,10 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
                                     Ok((prepared, n)) => {
                                         session.install_collision(prepared)?;
                                         blocks = Some((revision, spawn));
-                                        diag::info!(World, "Skate: {n} block collision triangles around the spawn");
+                                        diag::info!(
+                                            World,
+                                            "Skate: {n} block collision triangles around the spawn"
+                                        );
                                     }
                                     Err(e) => diag::warn!(World, "Skate block collision: {e}"),
                                 }
@@ -201,7 +207,12 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
                                 yaw.to_radians() + std::f32::consts::FRAC_PI_2,
                             )?;
                             if publish
-                                .send(Reply::Activated(epoch, p, start.elapsed().as_millis()))
+                                .send(Reply::Activated(
+                                    epoch,
+                                    p,
+                                    start.elapsed().as_millis(),
+                                    Instant::now(),
+                                ))
                                 .is_err()
                             {
                                 break;
@@ -231,13 +242,19 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
                             {
                                 let far = blocks.is_none_or(|(_, centre)| {
                                     let d = (at - centre) / sim::voxel::BLOCK;
-                                    d.truncate().length() > BLOCK_RECENTRE || d.z.abs() > BLOCK_DEPTH as f32 * 0.5
+                                    d.truncate().length() > BLOCK_RECENTRE
+                                        || d.z.abs() > BLOCK_DEPTH as f32 * 0.5
                                 });
                                 // Only changes that reach the blocks it covers: chunks
                                 // stream in and out far away the whole time.
                                 let changed = requested.elapsed().as_secs_f32() > 0.25
                                     && blocks.is_some_and(|(revision, centre)| {
-                                        sim::voxel::changed_near(revision, centre.to_array(), BLOCK_RADIUS, BLOCK_DEPTH)
+                                        sim::voxel::changed_near(
+                                            revision,
+                                            centre.to_array(),
+                                            BLOCK_RADIUS,
+                                            BLOCK_DEPTH,
+                                        )
                                     });
                                 if (far || changed) && build_send.send(at).is_ok() {
                                     building = true;
@@ -260,7 +277,7 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
                                     return Err("Skate published a non-finite pose".into());
                                 }
                                 skater_at = Some(collision::from_skate(p.root.w_axis.truncate()));
-                                if publish.send(Reply::Pose(epoch, p)).is_err() {
+                                if publish.send(Reply::Pose(epoch, p, Instant::now())).is_err() {
                                     break;
                                 }
                             }
@@ -281,10 +298,26 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
     Ok(())
 }
 
-fn stop(host: &mut Host, mode: &mut SkateMode, authority: &mut net::AuthorityWorld) {
-    authority
-        .0
-        .set_external_motion(sim::ClientId(mode.client), false);
+fn stop(
+    host: &mut Host,
+    mode: &mut SkateMode,
+    authority: &mut net::AuthorityWorld,
+    preserve_velocity: bool,
+) {
+    let client = sim::ClientId(mode.client);
+    if preserve_velocity {
+        let fresh = host
+            .last_pose_published
+            .is_some_and(|at| at.elapsed() <= Duration::from_millis(250));
+        let velocity = if fresh && mode.velocity.is_finite() {
+            mode.velocity
+        } else {
+            Vec3::ZERO
+        };
+        authority.0.set_velocity(client, velocity.to_array());
+    }
+    authority.0.set_external_motion(client, false);
+    host.last_pose_published = None;
     host.enter_requested = false;
     host.activating = false;
     host.epoch = host.epoch.wrapping_add(1);
@@ -294,6 +327,7 @@ fn stop(host: &mut Host, mode: &mut SkateMode, authority: &mut net::AuthorityWor
     mode.active = false;
     mode.entering = false;
     mode.camera = None;
+    mode.velocity = Vec3::ZERO;
     mode.bones.clear();
     mode.status.clear();
     diag::info!(World, "Skate mode stopped; map session retained");
@@ -308,6 +342,12 @@ fn present(mode: &mut SkateMode, p: Pose, authority: &mut net::AuthorityWorld) {
     mode.names = p.names;
     mode.tick = p.tick;
     mode.status = p.state;
+    let velocity = collision::from_skate(p.velocity);
+    mode.velocity = if velocity.is_finite() {
+        velocity
+    } else {
+        Vec3::ZERO
+    };
     mode.camera = p.camera.map(|(position, basis, fov)| {
         (
             Transform::from_translation(collision::from_skate(position)).looking_to(
@@ -333,7 +373,10 @@ fn update(
     mut authority: Option<ResMut<net::AuthorityWorld>>,
     mut mode: ResMut<SkateMode>,
     mut host: ResMut<Host>,
-    (gamepads, active): (Query<&bevy::input::gamepad::Gamepad>, Option<Res<frame::ActivePad>>),
+    (gamepads, active): (
+        Query<&bevy::input::gamepad::Gamepad>,
+        Option<Res<frame::ActivePad>>,
+    ),
 ) {
     let Some(authority) = authority.as_deref_mut() else {
         return;
@@ -349,7 +392,7 @@ fn update(
         .as_ref()
         .is_none_or(|a| clip.0.as_ref().is_some_and(|b| Arc::ptr_eq(a, b)));
     if (mode.active || host.enter_requested || host.activating) && (!alive || !same_map) {
-        stop(&mut host, &mut mode, authority);
+        stop(&mut host, &mut mode, authority, false);
     }
     if !same_map {
         host.send = None;
@@ -374,7 +417,9 @@ fn update(
     }
     // Skating reads the same controller as the rest of the game, whatever
     // kind it is, converted to the Xbox layout the skate input expects.
-    let pad = active.and_then(|active| active.0).and_then(|entity| gamepads.get(entity).ok());
+    let pad = active
+        .and_then(|active| active.0)
+        .and_then(|entity| gamepads.get(entity).ok());
     host.pad_packet = host.pad_packet.wrapping_add(1);
     let input = pad.map_or_else(InputFrame::neutral, |pad| pad_frame(pad, host.pad_packet));
     mode.controller = input.controller();
@@ -402,16 +447,19 @@ fn update(
                 mode.preload_pending = false;
                 diag::info!(World, "Skate ready before toggle");
             }
-            Reply::Activated(epoch, p, ms) if epoch == host.epoch && host.activating && alive => {
+            Reply::Activated(epoch, p, ms, published_at)
+                if epoch == host.epoch && host.activating && alive =>
+            {
                 host.activating = false;
                 mode.entering = false;
                 mode.active = true;
                 host.input_suspended = false;
                 authority.0.set_external_motion(local.0, true);
+                host.last_pose_published = Some(published_at);
                 present(&mut mode, p, authority);
                 diag::info!(World, "Skate activation from retained session: {ms}ms");
             }
-            Reply::Pose(epoch, p) if epoch == host.epoch && mode.active => {
+            Reply::Pose(epoch, p, published_at) if epoch == host.epoch && mode.active => {
                 if p.tick / 120 != host.logged_tick / 120 {
                     diag::info!(
                         World,
@@ -422,10 +470,11 @@ fn update(
                     );
                     host.logged_tick = p.tick;
                 }
+                host.last_pose_published = Some(published_at);
                 present(&mut mode, p, authority);
             }
             Reply::Error(e) => {
-                stop(&mut host, &mut mode, authority);
+                stop(&mut host, &mut mode, authority, false);
                 host.send = None;
                 host.receive = None;
                 host.ready = false;
@@ -444,7 +493,8 @@ fn update(
     }
     if std::mem::take(&mut mode.toggle_requested) && alive {
         if mode.active || host.enter_requested || host.activating {
-            stop(&mut host, &mut mode, authority);
+            let preserve_velocity = mode.active;
+            stop(&mut host, &mut mode, authority, preserve_velocity);
             return;
         }
         if host.send.is_none() {
@@ -494,7 +544,7 @@ fn update(
             ))
             .is_err()
         {
-            stop(&mut host, &mut mode, authority);
+            stop(&mut host, &mut mode, authority, false);
         }
     }
 }

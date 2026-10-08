@@ -12,3 +12,54 @@ iw4l-artifacts
 # Agent working memory. None of it is the product: the artifacts, the externals,
 # the agent clones and the RE tooling and its bases all stay on this machine.
 /context/
+
+# Local builds, installers, logs, and game installation folders.
+/outputs/
+/work/
+/Games/
+/games/
+/keyboard/
+/tools/keyboard/bin/
+**/obj/
+*.log
+*.lnk
+*.exe
+*.dll
+*.pdb
+*.msi
+
+# Commercial game copies and extracted/converted assets.
+# Keep /skate/: it contains the upstream Rust implementation and converter source.
+/skate-data/
+**/skate-data/assets/
+**/assets/private/
+**/skate-assets/
+**/mw2-data/
+**/Call of Duty Modern Warfare 2*/
+/data/
+/zone/
+/main/
+/raw/
+*.xex
+*.ff
+*.iwd
+*.iso
+*.xma
+*.big
+*.hkx
+*.hkt
+*.iwi
+*.d3dbsp
+*.bik
+*.pak
+*.fsb
+*.xsb
+*.xwb
+*.rar
+*.7z
+*.zip
+
+# Per-user bindings and mapper runtime state; defaults are mapping.default.ini.
+mapping.ini
+mapping.ini.new
+skate-context.txt

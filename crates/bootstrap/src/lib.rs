@@ -3,6 +3,7 @@ pub mod bench;
 mod frame_owner;
 mod launch;
 mod plugins;
+pub mod version;
 
 pub use args::{AcceptanceLaunch, LaunchMode, parse_cli};
 pub use launch::launch;

@@ -264,7 +264,20 @@ impl SimWorld {
     }
 
     pub fn set_external_motion(&mut self, id: ClientId, enabled: bool) {
-        if enabled { self.frame().external_motion.insert(id); } else { self.frame().external_motion.remove(&id); }
+        if enabled {
+            self.frame().external_motion.insert(id);
+        } else {
+            self.frame().external_motion.remove(&id);
+        }
+    }
+
+    pub fn set_velocity(&mut self, id: ClientId, velocity: [f32; 3]) -> bool {
+        let mut frame = self.frame();
+        let Some(player) = frame.player_mut(id) else {
+            return false;
+        };
+        player.velocity = velocity;
+        true
     }
 
     pub fn set_origin(&mut self, id: ClientId, origin: [f32; 3]) -> bool {

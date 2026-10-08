@@ -15,6 +15,7 @@ pub struct SkateMode {
     pub bones: Vec<Mat4>,
     pub names: Vec<String>,
     pub camera: Option<(Transform, f32)>,
+    pub velocity: Vec3,
     pub tick: u64,
     pub status: String,
 }

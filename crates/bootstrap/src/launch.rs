@@ -4,10 +4,10 @@ use asset_audio::load_mp_sound_bank;
 use asset_game::{load_mp_localized_strings, load_ui_menu_catalog};
 use asset_transport::{LoadProgress, find_runtime_common_mp};
 // The Minecraft world is found and listed as a map of its own.
-use assets::{find_zone_file, list_mp_map_packs};
 use assets::{
     LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceSoundIwd, NamespaceTrees,
 };
+use assets::{find_zone_file, list_mp_map_packs};
 use audio::{SoundBank, SoundIwd};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
@@ -140,6 +140,7 @@ pub fn launch(
         );
     }
     match mode {
+        LaunchMode::Help => diag::announce_stdout(crate::args::USAGE),
         LaunchMode::Menu => {
             if acceptance.is_some() {
                 fatal(&format!(
