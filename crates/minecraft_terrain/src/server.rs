@@ -683,6 +683,37 @@ impl ServerSim {
         self.level.set_block(at, target, flags, update::LIMIT);
     }
 
+    pub fn destroy_blocks_without_drops(&mut self, positions: &[BlockPos]) {
+        if positions.is_empty() {
+            return;
+        }
+        let drops = self.level.block_drops;
+        self.level.block_drops = false;
+        for &(x, y, z) in positions {
+            self.level.set_block(
+                minecraftoss_core::BlockPos::new(x, y, z),
+                BlockStateId::AIR,
+                update::ALL | update::SUPPRESS_DROPS | update::SKIP_BLOCK_ENTITY_SIDEEFFECTS,
+                update::LIMIT,
+            );
+        }
+        self.level.block_drops = drops;
+        let positions: std::collections::HashSet<_> = positions.iter().copied().collect();
+        let registries = self.states.registries().clone();
+        self.level.entities.retain(|entity| {
+            let Some(item) = entity.item_data() else {
+                return true;
+            };
+            if registries.blocks.parse_state(&item.stack.id).is_err() {
+                return true;
+            }
+            let [x, y, z] = entity.pos.map(|v| v.floor() as i32);
+            !(-1..=1).any(|dx| {
+                (-1..=1).any(|dy| (-1..=1).any(|dz| positions.contains(&(x + dx, y + dy, z + dz))))
+            })
+        });
+    }
+
     /// `useWithoutItem` on a simulated block; false when not simulated.
     pub fn use_block(&mut self, pos: BlockPos, player_facing: &str) -> bool {
         let facing = minecraftoss_core::pos::Direction::from_name(player_facing);
@@ -830,6 +861,7 @@ pub enum Command {
     UnloadChunk(ChunkPos),
     /// A block the client set, as the client scene now shows it.
     PlayerEdit { pos: BlockPos, block: Option<Block>, edit: PlayerEdit },
+    DestroyBlocksWithoutDrops(Vec<BlockPos>),
     UseBlock { pos: BlockPos, facing: &'static str },
     BoneMeal { pos: BlockPos, face: &'static str },
     Attack(BlockPos),
@@ -972,6 +1004,12 @@ impl ServerHandle {
         self.send(Command::PlayerEdit { pos, block, edit });
     }
 
+    pub fn destroy_blocks_without_drops(&mut self, positions: Vec<BlockPos>) {
+        if !positions.is_empty() {
+            self.send(Command::DestroyBlocksWithoutDrops(positions));
+        }
+    }
+
     fn state_in(&self, scene: &HandcraftedScene, pos: BlockPos) -> Option<BlockStateId> {
         Scene::block(scene, pos).and_then(|b| self.states.state_of(b))
     }
@@ -1099,6 +1137,7 @@ fn server_loop(mut sim: ServerSim, commands: std::sync::mpsc::Receiver<Command>,
                 Command::LoadChunk(chunk) => sim.load_chunk(&chunk),
                 Command::UnloadChunk(pos) => sim.unload_chunk(pos),
                 Command::PlayerEdit { pos, block, edit } => sim.player_edit_block(pos, block.as_ref(), edit),
+                Command::DestroyBlocksWithoutDrops(positions) => sim.destroy_blocks_without_drops(&positions),
                 Command::UseBlock { pos, facing } => {
                     sim.use_block(pos, facing);
                 }

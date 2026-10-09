@@ -98,11 +98,19 @@ pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &
     if !world.publishes_snapshot() {
         return;
     }
-    if crate::voxel::active() {
-        crate::voxel::push_explosion(blast.origin);
+    if crate::voxel::active() && (blast.inner_damage > 0.0 || blast.outer_damage > 0.0) {
+        crate::voxel::push_explosion(blast.origin, blast.radius, blast.cone);
     }
+    apply_voxel_mob_blast(world, blast);
     let attempts = radius_player_attempts(world, blast);
-    let glass = radius_glass_hits(world, blast);
+    let glass = radius_glass_hits(
+        world,
+        blast.origin,
+        blast.radius,
+        blast.inner_damage,
+        blast.outer_damage,
+        |point| blast.contains(point),
+    );
     for attempt in &attempts {
         let _ = apply_damage_attempt(world, tick, attempt);
     }
@@ -186,6 +194,53 @@ pub(crate) fn apply_block_world_damage(world: &mut FrameWorld, tick: Tick) {
     }
 }
 
+struct VoxelMobBlast {
+    origin: [f32; 3],
+    radius: f32,
+    inner: f32,
+    outer: f32,
+    credit: Option<crate::voxel::MobAttackCredit>,
+}
+
+fn apply_voxel_mob_blast(world: &FrameWorld, blast: &ExplosionBlast) {
+    apply_voxel_mob_radius(
+        world,
+        &VoxelMobBlast {
+            origin: blast.origin,
+            radius: blast.radius,
+            inner: blast.inner_damage,
+            outer: blast.outer_damage,
+            credit: Some(crate::voxel::MobAttackCredit {
+                client: blast.attacker,
+                life: blast.attacker_life,
+            }),
+        },
+        |point| blast.contains(point),
+    );
+}
+
+fn apply_voxel_mob_radius(
+    world: &FrameWorld,
+    blast: &VoxelMobBlast,
+    contains: impl Fn([f32; 3]) -> bool,
+) {
+    if !world.publishes_snapshot() || !crate::voxel::active() {
+        return;
+    }
+    for (key, mid, distance) in crate::voxel::mob_blast_targets(blast.origin, blast.radius) {
+        if !contains(mid) {
+            continue;
+        }
+        let trace = world.trace_world_except(blast.origin, mid, G_CAN_DAMAGE_CONTENTS_MASK, None);
+        if !t_trace_passed(&trace) {
+            continue;
+        }
+        let amount = radius_damage_amount(blast.inner, blast.outer, blast.radius, distance, 1.0);
+        if amount > 0 {
+            crate::voxel::push_mob_damage(key, amount as f32, blast.origin, blast.credit);
+        }
+    }
+}
 fn apply_entity_blast(world: &mut FrameWorld, blast: &ExplosionBlast) {
     if blast.radius <= 0.0 {
         return;
@@ -235,6 +290,28 @@ pub(crate) fn apply_script_blast(
         return;
     }
     if world.publishes_snapshot() {
+        if crate::voxel::active() && (blast.max > 0.0 || blast.min > 0.0) {
+            crate::voxel::push_explosion(blast.origin, blast.radius, None);
+        }
+        let credit = blast.attacker.and_then(|client| {
+            world
+                .client_meta(client)
+                .map(|meta| crate::voxel::MobAttackCredit {
+                    client,
+                    life: meta.life_sequence,
+                })
+        });
+        apply_voxel_mob_radius(
+            world,
+            &VoxelMobBlast {
+                origin: blast.origin,
+                radius: blast.radius,
+                inner: blast.max,
+                outer: blast.min,
+                credit,
+            },
+            |_| true,
+        );
         crate::script::host::triggers::damage_blast(
             world.ecs(),
             &crate::script::host::triggers::TriggerBlast {
@@ -438,32 +515,61 @@ fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<Dam
     intents
 }
 
-fn radius_glass_hits(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<GlassBlastHit> {
+pub(crate) fn apply_glass_radius_damage(
+    world: &mut FrameWorld,
+    tick: Tick,
+    origin: [f32; 3],
+    radius: f32,
+    max: f32,
+    min: f32,
+    credit: Option<crate::voxel::MobAttackCredit>,
+) {
+    if !world.publishes_snapshot()
+        || !radius.is_finite()
+        || radius <= 0.0
+        || !origin.iter().all(|v| v.is_finite())
+        || !(max > 0.0 || min > 0.0)
+    {
+        return;
+    }
+    crate::voxel::push_explosion(origin, radius, None);
+    apply_voxel_mob_radius(
+        world,
+        &VoxelMobBlast {
+            origin,
+            radius,
+            inner: max,
+            outer: min,
+            credit,
+        },
+        |_| true,
+    );
+    let hits = radius_glass_hits(world, origin, radius, max, min, |_| true);
+    apply_glass_blast_hits(world, tick, hits);
+}
+fn radius_glass_hits(
+    world: &FrameWorld,
+    origin: [f32; 3],
+    radius: f32,
+    inner_damage: f32,
+    outer_damage: f32,
+    contains: impl Fn([f32; 3]) -> bool,
+) -> Vec<GlassBlastHit> {
     let mut hits = Vec::new();
-    if blast.radius <= 0.0 {
+    if radius <= 0.0 {
         return hits;
     }
     for (id, pane) in world.world_objects().glass_radius_targets() {
         let (mid, half) = glass_pane_aabb(pane);
-        if !blast.contains(mid) {
+        if !contains(mid) {
             continue;
         }
-        let dist = radius_damage_distance_to_aabb(blast.origin, mid, half);
-        let amount = radius_damage_amount(
-            blast.inner_damage,
-            blast.outer_damage,
-            blast.radius,
-            dist,
-            1.0,
-        );
+        let dist = radius_damage_distance_to_aabb(origin, mid, half);
+        let amount = radius_damage_amount(inner_damage, outer_damage, radius, dist, 1.0);
         if amount <= 0 {
             continue;
         }
-        let dir = [
-            mid[0] - blast.origin[0],
-            mid[1] - blast.origin[1],
-            mid[2] - blast.origin[2],
-        ];
+        let dir = [mid[0] - origin[0], mid[1] - origin[1], mid[2] - origin[2]];
         hits.push(GlassBlastHit {
             id,
             amount: amount as u32,

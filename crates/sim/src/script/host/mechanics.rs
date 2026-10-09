@@ -1,4 +1,4 @@
-use super::entities::Link;
+use super::entities::{EntityKind, Link};
 use crate::script::runtime::raise;
 use crate::script::{BTreeMap, Resource, Runtime, Value};
 use bevy_ecs::prelude::World;
@@ -32,6 +32,339 @@ const BODY_MAXS: [f32; 3] = [12.0, 12.0, 24.0];
 const EXPLOSION_FORCE: f32 = 12500.0;
 const EXPLOSION_UPBIAS: f32 = 0.5;
 const EXPLOSION_MIN_FORCE: f32 = 40.0;
+
+pub(crate) fn model_local_bounds(world: &mut World, object: u64) -> Option<([f32; 3], [f32; 3])> {
+    let presence = world
+        .resource::<Runtime>()
+        .entities
+        .get(&object)?
+        .presence?;
+    let frame = crate::frame::FrameWorld::from_world(world);
+    let row = frame
+        .entity_collision_capabilities()
+        .iter()
+        .find(|row| row.owner.script_model() == Some(presence))?;
+    let dobj = row.dobj.as_ref()?;
+
+    dobj.capability.as_ref()?.bounds
+}
+
+fn model_aabb_at_pose(
+    bounds: ([f32; 3], [f32; 3]),
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> Option<([f32; 3], [f32; 3])> {
+    let (mid, half) = bounds;
+    if !mid.iter().chain(half.iter()).all(|v| v.is_finite())
+        || half.iter().any(|v| *v < 0.0)
+        || half.iter().all(|v| *v == 0.0)
+    {
+        return None;
+    }
+    let axis = math_iw4::angles_to_axis(angles);
+    let mut mins = [f32::MAX; 3];
+    let mut maxs = [f32::MIN; 3];
+    for x in [-1.0, 1.0] {
+        for y in [-1.0, 1.0] {
+            for z in [-1.0, 1.0] {
+                let local = [
+                    mid[0] + x * half[0],
+                    mid[1] + y * half[1],
+                    mid[2] + z * half[2],
+                ];
+                let point: [f32; 3] = std::array::from_fn(|i| {
+                    origin[i]
+                        + axis[0][i] * local[0]
+                        + axis[1][i] * local[1]
+                        + axis[2][i] * local[2]
+                });
+                for i in 0..3 {
+                    mins[i] = mins[i].min(point[i]);
+                    maxs[i] = maxs[i].max(point[i]);
+                }
+            }
+        }
+    }
+    mins.iter()
+        .chain(maxs.iter())
+        .all(|v| v.is_finite())
+        .then_some((mins, maxs))
+}
+
+pub(crate) fn voxel_clear_origin_for_bounds(
+    bounds: ([f32; 3], [f32; 3]),
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> Option<[f32; 3]> {
+    voxel_clear_origin_for_bounds_and_camera(bounds, origin, angles, None)
+}
+
+pub(crate) fn voxel_clear_origin_for_bounds_and_camera(
+    bounds: ([f32; 3], [f32; 3]),
+    origin: [f32; 3],
+    angles: [f32; 3],
+    camera_local: Option<[f32; 3]>,
+) -> Option<[f32; 3]> {
+    if !crate::voxel::active() {
+        return Some(origin);
+    }
+    let (mins, maxs) = model_aabb_at_pose(bounds, origin, angles)?;
+    let mut raise_by = match crate::voxel::loaded_surface_z_under(mins, maxs) {
+        Some(Some(surface)) if surface.is_finite() && mins[2] < surface => surface - mins[2],
+        _ => 0.0,
+    };
+    if let Some(camera_local) = camera_local {
+        let axis = math_iw4::angles_to_axis(angles);
+        let camera: [f32; 3] = std::array::from_fn(|i| {
+            origin[i]
+                + axis[0][i] * camera_local[0]
+                + axis[1][i] * camera_local[1]
+                + axis[2][i] * camera_local[2]
+        });
+        let half = playerstate_iw4::CG_CAMERA_PULLBACK_BOX_HALF;
+        let camera_min = camera.map(|v| v - half);
+        let camera_max = camera.map(|v| v + half);
+        match crate::voxel::loaded_surface_z_under(camera_min, camera_max) {
+            Some(Some(surface)) if surface.is_finite() && camera_min[2] < surface => {
+                raise_by = raise_by.max(surface - camera_min[2]);
+            }
+            _ => {}
+        }
+    }
+    Some([origin[0], origin[1], origin[2] + raise_by])
+}
+
+pub(crate) fn voxel_flight_origin_for_model(
+    world: &mut World,
+    object: u64,
+    origin: [f32; 3],
+    angles: [f32; 3],
+    clearance: f32,
+    entry_surface: Option<f32>,
+) -> Option<[f32; 3]> {
+    let bounds = model_local_bounds(world, object)?;
+    let (mins, maxs) = model_aabb_at_pose(bounds, origin, angles)?;
+    let surface = crate::voxel::loaded_surface_z_under(mins, maxs)
+        .flatten()
+        .or(entry_surface)?;
+    if !surface.is_finite() || !clearance.is_finite() || clearance < 0.0 {
+        return None;
+    }
+    let lift = (surface + clearance - mins[2]).max(0.0);
+    Some([origin[0], origin[1], origin[2] + lift])
+}
+
+pub(crate) fn voxel_clear_origin_for_model(
+    world: &mut World,
+    object: u64,
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> Option<[f32; 3]> {
+    let bounds = model_local_bounds(world, object)?;
+    voxel_clear_origin_for_bounds(bounds, origin, angles)
+}
+
+pub(crate) fn linked_vehicle_camera_local(world: &mut World, object: u64) -> Option<[f32; 3]> {
+    let tag = world
+        .resource::<Runtime>()
+        .players
+        .values()
+        .find(|player| {
+            player.link.as_ref().is_some_and(|link| {
+                link.parent == object && link.view == super::players::LinkView::WeaponDelta
+            })
+        })
+        .and_then(|player| player.link.as_ref().and_then(|link| link.tag.clone()));
+    if let Some(tag) = tag {
+        let (tag_origin, _) = super::presence::tag_world(world, object, &tag)?;
+        let current_origin = {
+            let mut runtime = world.resource_mut::<Runtime>();
+            match runtime.object_field(object, "origin") {
+                Value::Vector(origin) => origin,
+                _ => return None,
+            }
+        };
+        let current_angles = {
+            let mut runtime = world.resource_mut::<Runtime>();
+            match runtime.object_field(object, "angles") {
+                Value::Vector(angles) => angles,
+                _ => return None,
+            }
+        };
+        let current_axis = math_iw4::angles_to_axis(current_angles);
+        let relative: [f32; 3] = std::array::from_fn(|i| tag_origin[i] - current_origin[i]);
+        Some(std::array::from_fn(|axis| {
+            (0..3).map(|i| relative[i] * current_axis[axis][i]).sum()
+        }))
+    } else {
+        Some([0.0; 3])
+    }
+}
+
+fn entity_model_aabb(world: &mut World, object: u64) -> Option<([f32; 3], [f32; 3])> {
+    let (origin, angles) = {
+        let mut runtime = world.resource_mut::<Runtime>();
+        let Value::Vector(origin) = runtime.object_field(object, "origin") else {
+            return None;
+        };
+        let Value::Vector(angles) = runtime.object_field(object, "angles") else {
+            return None;
+        };
+        (origin, angles)
+    };
+    let bounds = model_local_bounds(world, object)?;
+    model_aabb_at_pose(bounds, origin, angles)
+}
+fn linked_camera_carrier_roots(
+    world: &World,
+) -> Vec<(u64, Vec<u64>, Vec<(u64, Option<std::sync::Arc<str>>)>)> {
+    let runtime = world.resource::<Runtime>();
+    let mut carriers =
+        std::collections::BTreeMap::<u64, Vec<(u64, Option<std::sync::Arc<str>>)>>::new();
+    for player in runtime.players.values() {
+        let Some(link) = player.link.as_ref().filter(|link| {
+            link.view == super::players::LinkView::WeaponDelta
+                && runtime.live(&link.parent)
+                && !runtime.vehicles.contains_key(&link.parent)
+        }) else {
+            continue;
+        };
+        let mut root = link.parent;
+        let mut parents = vec![root];
+        loop {
+            let Some(parent) = runtime
+                .entities
+                .get(&root)
+                .and_then(|entity| entity.linked_to.as_ref())
+                .map(|link| link.parent)
+            else {
+                break;
+            };
+            let Some(parent_entity) = runtime.entities.get(&parent) else {
+                break;
+            };
+            if matches!(&parent_entity.kind, EntityKind::Map)
+                || runtime.vehicles.contains_key(&parent)
+                || parents.contains(&parent)
+            {
+                break;
+            }
+            root = parent;
+            parents.push(root);
+        }
+        carriers
+            .entry(root)
+            .or_default()
+            .push((link.parent, link.tag.clone()));
+    }
+
+    let mut groups = Vec::new();
+    for (root, cameras) in carriers {
+        let mut members = vec![root];
+        let mut index = 0;
+        while index < members.len() {
+            let parent = members[index];
+            for (child, entity) in &runtime.entities {
+                if entity
+                    .linked_to
+                    .as_ref()
+                    .is_some_and(|link| link.parent == parent)
+                    && !members.contains(child)
+                {
+                    members.push(*child);
+                }
+            }
+            index += 1;
+        }
+        let cameras = cameras
+            .into_iter()
+            .filter(|(parent, _)| members.contains(parent))
+            .collect();
+        groups.push((root, members, cameras));
+    }
+    groups
+}
+
+fn clear_linked_camera_carriers(world: &mut World) -> bool {
+    if !crate::voxel::active() {
+        return false;
+    }
+    let groups = linked_camera_carrier_roots(world);
+    let mut changed = false;
+    for (root, members, cameras) in groups {
+        let mut bounds = Vec::new();
+        for object in &members {
+            let (hidden, has_presence) = {
+                let runtime = world.resource::<Runtime>();
+                let Some(entity) = runtime.entities.get(object) else {
+                    continue;
+                };
+                (entity.hidden, entity.presence.is_some())
+            };
+            let visible_model = !hidden
+                && matches!(world.resource_mut::<Runtime>().object_field(*object, "model"), Value::String(model) if !model.is_empty());
+            if !visible_model || !has_presence {
+                continue;
+            }
+            match entity_model_aabb(world, *object) {
+                Some(aabb) => bounds.push((*object, aabb)),
+                None => {}
+            }
+        }
+        let mut raise_by = 0.0f32;
+        for (_, (mins, maxs)) in &bounds {
+            match crate::voxel::loaded_surface_z_under(*mins, *maxs) {
+                Some(Some(surface)) if surface.is_finite() => {
+                    raise_by = raise_by.max(surface - mins[2]);
+                }
+                Some(_) => {}
+                None => {}
+            }
+        }
+        for (parent, tag) in &cameras {
+            let camera_pose = if let Some(tag) = tag.as_deref() {
+                super::presence::tag_world(world, *parent, tag)
+            } else {
+                Some(super::players::link_parent_pose(world, *parent, None))
+            };
+            let Some((camera_origin, _)) = camera_pose else {
+                continue;
+            };
+            let camera_half = playerstate_iw4::CG_CAMERA_PULLBACK_BOX_HALF;
+            let camera_min = [
+                camera_origin[0] - camera_half,
+                camera_origin[1] - camera_half,
+                camera_origin[2] - camera_half,
+            ];
+            let camera_max = [
+                camera_origin[0] + camera_half,
+                camera_origin[1] + camera_half,
+                camera_origin[2] + camera_half,
+            ];
+            match crate::voxel::loaded_surface_z_under(camera_min, camera_max) {
+                Some(Some(surface)) if surface.is_finite() => {
+                    raise_by = raise_by.max(surface - camera_min[2]);
+                }
+                Some(_) => {}
+                None => {}
+            }
+        }
+        if !raise_by.is_finite() || raise_by <= 0.0 {
+            continue;
+        }
+        let mut runtime = world.resource_mut::<Runtime>();
+        if !runtime.live(&root) {
+            continue;
+        }
+        let Value::Vector(mut origin) = runtime.object_field(root, "origin") else {
+            continue;
+        };
+        origin[2] += raise_by;
+        runtime.set_object_field(root, "origin", Value::Vector(origin));
+        changed = true;
+    }
+    changed
+}
 
 impl Mechanics {
     pub(crate) fn start(&mut self, object: u64, motion: Motion) {
@@ -175,6 +508,12 @@ pub(crate) fn advance_mechanics(world: &mut World) {
     advance_bodies(world);
     advance_slides(world);
     apply_entity_links(world);
+    super::presence::settle_collision(world);
+    let moved_camera_carrier = clear_linked_camera_carriers(world);
+    if moved_camera_carrier {
+        apply_entity_links(world);
+        super::presence::settle_collision(world);
+    }
     super::players::apply_player_links(world);
     super::presence::settle_collision(world);
 }

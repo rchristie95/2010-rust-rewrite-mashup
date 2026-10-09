@@ -365,6 +365,8 @@ fn stack_name(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_minecraft_hud(
     surface: Res<crate::surface::Hud2dSurface>,
+    presented: Res<net::PresentedSnapshot>,
+    local: Res<net::LocalPresentClient>,
     generation: Res<frame::WorldGeneration>,
     catalog: Option<Res<MenuCatalog>>,
     ui: Option<ResMut<MinecraftUi>>,
@@ -404,7 +406,18 @@ pub(crate) fn update_minecraft_hud(
 
     // Opening and closing, and the hotbar's keys.
     let open_before = ui.inventory_open;
-    if keys.just_pressed(KeyCode::KeyE) || (ui.inventory_open && keys.just_pressed(KeyCode::Escape))
+    let interaction_blocked = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .is_some_and(|meta| {
+            meta.controls.usability_disabled
+                || meta.controls.linked
+                || meta.remote_missile.is_some()
+        });
+    if interaction_blocked {
+        ui.inventory_open = false;
+    } else if keys.just_pressed(KeyCode::KeyI)
+        || (ui.inventory_open && keys.just_pressed(KeyCode::Escape))
     {
         ui.inventory_open = !ui.inventory_open && !keys.just_pressed(KeyCode::Escape);
     }
@@ -821,7 +834,7 @@ fn draw_inventory(
         PANEL_Y + 7.5,
         6.0,
         TEXT_DIM,
-        "SURVIVAL  //  E TO CLOSE",
+        "SURVIVAL  //  I TO CLOSE",
         true,
         c,
     );

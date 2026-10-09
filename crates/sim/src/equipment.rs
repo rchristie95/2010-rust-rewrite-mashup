@@ -78,6 +78,7 @@ pub(crate) enum WeaponNote {
     },
     Fired {
         owner: ClientId,
+        weapon: u32,
     },
     DetonationRequested {
         owner: ClientId,
@@ -387,6 +388,7 @@ pub(crate) fn explode_offhand_in_hand(
 pub enum ProjectileHitGeometry {
     World,
     Player,
+    VoxelMob { key: u64 },
     Entity { epoch: EntityCollisionEpoch },
     Bounce,
     Fuse,
@@ -782,6 +784,34 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         }
         TraceOutcome::Miss { .. } | TraceOutcome::Invalid { .. } => None,
     };
+    let mob_contact = if projectile.live
+        && facts.proj_impact_explode
+        && facts.impact_payload_weapon == 0
+        && weapon_iw4::fire_weapon_kind(facts.weap_type, facts.weap_class)
+            == Some(weapon_iw4::FireWeaponKind::Missile)
+    {
+        let limit = match outcome {
+            TraceOutcome::Hit { end, .. } | TraceOutcome::Miss { end } => Some(end),
+            TraceOutcome::StartSolid { .. } | TraceOutcome::Invalid { .. } => None,
+        };
+        limit.and_then(|limit| {
+            let delta = core::array::from_fn(|i| end[i] - start[i]);
+            let length = vec3_length(delta);
+            if length <= 0.0 || !length.is_finite() {
+                return None;
+            }
+            let (key, distance, _) = crate::voxel::mob_on_segment(start, limit)?;
+            let fraction = (distance / length).clamp(0.0, 1.0);
+            let point = core::array::from_fn(|i| start[i] + delta[i] * fraction);
+            let normal = delta.map(|axis| -axis / length);
+            Some((key, point, normal, fraction))
+        })
+    } else {
+        None
+    };
+    if let Some((_, point, normal, fraction)) = mob_contact {
+        hit = Some((point, normal, None, fraction));
+    }
     let mut contact_origin = None;
     if facts.is_retrievable_knife()
         && let Some((end, normal, collider, _)) = hit
@@ -1195,7 +1225,10 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                             origin: end,
                             normal,
                             surf_type: 0,
-                            geometry: ProjectileHitGeometry::World,
+                            geometry: mob_contact
+                                .map_or(ProjectileHitGeometry::World, |(key, _, _, _)| {
+                                    ProjectileHitGeometry::VoxelMob { key }
+                                }),
                             terminal: None,
                             amount: facts.impact_damage.max(0),
                             fraction: Some(fraction),

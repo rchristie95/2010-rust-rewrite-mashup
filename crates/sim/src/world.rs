@@ -1283,6 +1283,20 @@ impl SimState {
             .filter(|&i| i != 0)
     }
 
+    pub(crate) fn explosive_bullet_facts_for(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
+        if !self.bullet_pen_facts_for(weapon).explosive_bullet {
+            return None;
+        }
+        self.content
+            .data
+            .equipment_runtime
+            .get(weapon as usize)
+            .copied()
+            .filter(|facts| {
+                facts.explosion_radius.max(facts.explosion_radius_min) > 0
+                    && (facts.explosion_inner_damage > 0 || facts.explosion_outer_damage > 0)
+            })
+    }
     pub(crate) fn equipment_facts_for(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
         self.content
             .data
@@ -3146,7 +3160,11 @@ impl SimState {
                 match_elapsed_ms: self.match_elapsed_ms,
                 prematch: self.prematch,
                 score_limit: self.bootstrap.score_limit,
-                time_limit_ms: if crate::voxel::active() { 0 } else { self.bootstrap.time_limit_ms },
+                time_limit_ms: if crate::voxel::active() {
+                    0
+                } else {
+                    self.bootstrap.time_limit_ms
+                },
                 kind: self.bootstrap.kind,
                 clients,
                 journal: self.journal.clone(),

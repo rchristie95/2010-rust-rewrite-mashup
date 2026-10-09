@@ -17,12 +17,13 @@ Modern Warfare 2, Skate 3 and Minecraft in one game, all running on
 - Confirmed mob hits use MW2's hitmarker and hit sound. Mob kills award the current mode's normal kill XP and points, and count toward killstreak rewards, including when playing alone.
 - Use **1–9** for the Minecraft hotbar. **Ctrl+1–9** equips the matching earned reward in the numbered killstreak list; loadout numbers stay fixed after use, and the ready message shows that shortcut. Throw care package markers with the fire button. Ctrl is reserved for these shortcuts and **Z** goes prone. Numpad skate bindings remain separate.
 - Shoot blocks to break them. Harder blocks take more bullets, scaled by each gun's real MW2 damage and range. Knife them too. Grenades blow up like TNT.
-- Broken blocks drop items that you pick up.
+- Gunfire and hand mining drop block materials. Explosions and killstreak fire destroy blocks without material drops and clear nearby loose block materials.
 - A Minecraft inventory and hotbar restyled in MW2's look. Your guns sit in the hotbar as items, and your MW2 character stands in the inventory window.
 - Hold a block to place it. With an empty hand you punch and mine with your bare MW2 hands.
 - Minecraft's block, mob and footstep sounds.
-- Unlimited ammo and grenades. The Intervention, SPAS-12 and UMP45 are always in your inventory. No time or score limit.
-- The minimap shows the Minecraft world around you.
+- The Intervention, SPAS-12 and UMP45 are supplied on spawn, with normal ammo use and reloading. No time or score limit.
+- The minimap and killstreak targeting maps show nearby Minecraft terrain and update after block edits.
+- Killstreak weapons damage mobs and terrain. Remote aircraft views support thermal vision, terrain clearance and camera cleanup on exit; inventory and crate interactions are blocked while controlling them.
 - Skate 3 mode works here too, with full block collision.
 
 You don't need Minecraft installed. The first time the game starts, it downloads Minecraft 26.3's own files (textures, sounds, world data) straight from Mojang's official servers, the same way the Minecraft launcher does. That's about 125 MB, into `iw4l-artifacts/minecraft-26.3`. After that it plays offline. Nothing from Minecraft is included in this repository.
@@ -56,7 +57,8 @@ configuration directory described in the [run guide](docs/RUN.md).
 | Mouse / WASD | Sticks | MW2 movement and shooting |
 | 1–9, mouse wheel | D-pad left / right | Select a hotbar slot |
 | | Y | Swap between the first two hotbar slots |
-| E | | Open or close the inventory |
+| I | | Open or close the inventory |
+| E | | Interact or pick up a care package |
 | Q | | Drop the selected item |
 | Left click (block or empty hand) | Right trigger | Mine or punch |
 | Right click (holding a block) | Left trigger | Place the block |

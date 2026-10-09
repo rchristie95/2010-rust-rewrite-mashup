@@ -148,25 +148,12 @@ pub(crate) fn update_compass(
         hide(&mut pass);
         return;
     };
-    // On a Minecraft map the minimap shows the Minecraft world.
-    let block_world = minecraft
-        .as_ref()
-        .filter(|ui| ui.active)
-        .and_then(|ui| ui.minimap.clone())
-        .and_then(|(image, a, b)| {
-            let map_ns = hud_images.map_namespace()?;
-            hud_images.insert_runtime_in(map_ns, MINECRAFT_MINIMAP, image);
-            // The picture has north (map +Y, Minecraft's -Z) up.
-            Some(DrawableCompass {
-                image_name: MINECRAFT_MINIMAP.to_owned(),
-                bounds: compass_map_bounds_from_minimap_corners(a, b, MINECRAFT_NORTH_YAW)?,
-                max_range: COMPASS_MAX_RANGE_DEFAULT_MP,
-                north_yaw: MINECRAFT_NORTH_YAW,
-            })
-        });
-    let Some(drawable) =
-        block_world.or_else(|| resolve(compass.as_deref(), &mut hud_images, &mut gaps))
-    else {
+    let Some(drawable) = resolve_world(
+        compass.as_deref(),
+        minecraft.as_deref(),
+        &mut hud_images,
+        &mut gaps,
+    ) else {
         hide(&mut pass);
         return;
     };
@@ -771,6 +758,26 @@ fn take_radar_pings(
         );
     }
     Some(line)
+}
+
+pub(crate) fn resolve_world(
+    compass: Option<&assets::SessionCompass>,
+    minecraft: Option<&frame::MinecraftUi>,
+    hud_images: &mut HudImages,
+    gaps: &mut HudPresentationGaps,
+) -> Option<DrawableCompass> {
+    if let Some(ui) = minecraft.filter(|ui| ui.map_active) {
+        let (image, a, b) = ui.minimap.as_ref()?;
+        let map_ns = hud_images.map_namespace()?;
+        hud_images.insert_runtime_in(map_ns, MINECRAFT_MINIMAP, image.clone());
+        return Some(DrawableCompass {
+            image_name: MINECRAFT_MINIMAP.to_owned(),
+            bounds: compass_map_bounds_from_minimap_corners(*a, *b, MINECRAFT_NORTH_YAW)?,
+            max_range: COMPASS_MAX_RANGE_DEFAULT_MP,
+            north_yaw: MINECRAFT_NORTH_YAW,
+        });
+    }
+    resolve(compass, hud_images, gaps)
 }
 
 pub(crate) fn resolve(

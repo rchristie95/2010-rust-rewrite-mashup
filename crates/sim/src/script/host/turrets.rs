@@ -467,6 +467,44 @@ fn shoot(world: &mut World, object: u64) {
     fire_bullet(world, object, from, turret.aim, turret.weapon, attacker);
 }
 
+fn explode_bullet(
+    world: &mut World,
+    tick: crate::Tick,
+    correlation: u32,
+    weapon: u32,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    attacker: Option<ClientId>,
+) {
+    let mut frame = FrameWorld::from_world(world);
+    if !frame.publishes_snapshot() {
+        return;
+    }
+    let Some(facts) = frame.explosive_bullet_facts_for(weapon) else {
+        return;
+    };
+    let Some(attacker) = attacker else { return };
+    let Some(life) = frame.client_meta(attacker).map(|meta| meta.life_sequence) else {
+        return;
+    };
+    crate::damage::apply_explosion_blast(
+        &mut frame,
+        tick,
+        &crate::damage::ExplosionBlast {
+            cone: (facts.damage_cone_angle > 0.0 && facts.damage_cone_angle < 180.0)
+                .then(|| (dir, facts.damage_cone_angle.to_radians().cos())),
+            origin,
+            radius: facts.explosion_radius.max(facts.explosion_radius_min) as f32,
+            inner_damage: facts.explosion_inner_damage as f32,
+            outer_damage: facts.explosion_outer_damage.max(0) as f32,
+            weapon,
+            source: crate::DamageSource::Shot(crate::ShotId(correlation)),
+            attacker,
+            attacker_life: life,
+            killcam_entity_start_time: 0,
+        },
+    );
+}
 pub(crate) fn fire_bullet(
     world: &mut World,
     object: u64,
@@ -475,21 +513,122 @@ pub(crate) fn fire_bullet(
     weapon: u32,
     attacker: Option<ClientId>,
 ) {
+    let Some(facts) = FrameWorld::from_world(world).combat_facts_for(weapon) else {
+        return;
+    };
+    let number = world.resource::<Runtime>().entities[&object].number;
+    let tick = world.resource::<crate::step::StepRequest>().tick;
+    let correlation = FrameWorld::from_world(world).alloc_shot_id().0;
+    FrameWorld::from_world(world).push_entity_event(
+        tick,
+        crate::EventAudience::All,
+        entity_iw4::EntityEventKind::SV_FIRE_WEAPON,
+        crate::EntityEventPayload {
+            number,
+            attacker_entity_num: attacker.map_or(number, |owner| owner.0 as i32),
+            weapon,
+            correlation,
+            origin: from,
+            origin2: from,
+            direction: math_iw4::vect_to_angles(dir),
+            ..Default::default()
+        },
+    );
     let range = weapon_range(world, weapon);
     let end = (Vec3::from_array(from) + Vec3::from_array(dir) * range).to_array();
-    let ignore = ignore_self(world, object);
+    let mut ignore = ignore_self(world, object);
+    ignore.client = attacker;
+    let outcome = entity_trace(world, from, end, MASK_SHOT, ignore);
+    if FrameWorld::from_world(world).publishes_snapshot() && crate::voxel::active() {
+        let stop = match outcome {
+            TraceOutcome::Hit { end, .. } | TraceOutcome::Miss { end } => Some(end),
+            _ => None,
+        };
+        if let Some(stop) = stop {
+            let credit = attacker.and_then(|client| {
+                FrameWorld::from_world(world)
+                    .client_meta(client)
+                    .map(|meta| crate::voxel::MobAttackCredit {
+                        client,
+                        life: meta.life_sequence,
+                    })
+            });
+            if let Some(credit) = credit
+                && let Some((key, distance, up)) = crate::voxel::mob_on_segment(from, stop)
+            {
+                let damage = crate::bullet::bullet_damage_at_distance(&facts, distance) as f32
+                    * facts.location_scale(crate::voxel::mob_hitloc(up));
+                crate::voxel::push_mob_shot(key, damage, from, credit);
+                let delta = Vec3::from_array(stop) - Vec3::from_array(from);
+                let end = (Vec3::from_array(from) + delta * (distance / delta.length().max(1e-3)))
+                    .to_array();
+                explode_bullet(world, tick, correlation, weapon, end, dir, attacker);
+                crate::voxel::push_ray(
+                    from,
+                    end,
+                    crate::bullet::bullet_damage_at_distance(&facts, 0.0) as f32,
+                    false,
+                );
+                FrameWorld::from_world(world).push_pellet_fx(crate::PelletFxRecord {
+                    attacker: number,
+                    weapon,
+                    correlation,
+                    pellet: 0,
+                    hand: 0,
+                    start: from,
+                    end,
+                    normal: [0.0; 3],
+                    surf_type: weapon_iw4::SURF_TYPE_FLESH as u8,
+                    surface_flags: 0,
+                    flesh_flags: 0,
+                });
+                return;
+            }
+            crate::voxel::push_ray(
+                from,
+                stop,
+                crate::bullet::bullet_damage_at_distance(&facts, 0.0) as f32,
+                false,
+            );
+            if let TraceOutcome::Hit {
+                collider: ColliderId::World { .. },
+                end,
+                normal,
+                ..
+            } = outcome
+            {
+                let distance = Vec3::from_array(end).distance(Vec3::from_array(from));
+                let damage = crate::bullet::bullet_damage_at_distance(&facts, distance) as f32
+                    * facts.location_scale(4).max(1.0);
+                crate::voxel::push_shot(end, normal, damage, false);
+            }
+        }
+    }
     let TraceOutcome::Hit {
         collider,
         end,
         normal,
         ..
-    } = entity_trace(world, from, end, MASK_SHOT, ignore)
+    } = outcome
     else {
+        if let TraceOutcome::Miss { end } = outcome {
+            FrameWorld::from_world(world).push_pellet_fx(crate::PelletFxRecord {
+                attacker: number,
+                weapon,
+                correlation,
+                pellet: 0,
+                hand: 0,
+                start: from,
+                end,
+                normal: [0.0; 3],
+                surf_type: 0,
+                surface_flags: 0,
+                flesh_flags: 0,
+            });
+        }
         return;
     };
-    let Some(facts) = FrameWorld::from_world(world).combat_facts_for(weapon) else {
-        return;
-    };
+    explode_bullet(world, tick, correlation, weapon, end, dir, attacker);
     let amount = facts.damage;
     let hit = match collider {
         ColliderId::Player { .. } | ColliderId::World { .. } => None,
@@ -499,7 +638,6 @@ pub(crate) fn fire_bullet(
         },
     };
     let runtime = world.resource::<Runtime>();
-    let number = runtime.entities[&object].number;
     let other_entity_num = match collider {
         ColliderId::Player { client, .. } => client.0 as i32,
         _ => hit
@@ -517,9 +655,7 @@ pub(crate) fn fire_bullet(
     } else {
         trace_iw4::surface_type_from_flags(surface_flags) as u8
     };
-    let tick = world.resource::<crate::step::StepRequest>().tick;
     let mut frame = FrameWorld::from_world(world);
-    let correlation = frame.alloc_shot_id().0;
     let payload = crate::EntityEventPayload {
         number,
         attacker_entity_num: number,

@@ -19,6 +19,9 @@ pub(crate) struct Plane {
     owner: u32,
     origin: [f32; 3],
     velocity: [f32; 3],
+    authored_origin: Option<[f32; 3]>,
+    presented_origin: Option<[f32; 3]>,
+    flight_lift: f32,
     compass: Option<([String; 2], [i32; 2])>,
 }
 
@@ -28,6 +31,8 @@ pub(crate) struct Heli {
     goal: Option<[f32; 3]>,
     path_node: Option<u64>,
     path_running: bool,
+    authored_origin: Option<[f32; 3]>,
+    presented_origin: Option<[f32; 3]>,
     velocity: [f32; 3],
     turning: f32,
     hover: Option<Hover>,
@@ -104,6 +109,8 @@ impl Default for Heli {
             goal: None,
             path_node: None,
             path_running: false,
+            authored_origin: None,
+            presented_origin: None,
             velocity: [0.0; 3],
             turning: 1.0,
             hover: None,
@@ -190,13 +197,61 @@ fn gunner_input(world: &mut World, client: u32) -> Option<([f32; 3], bool)> {
     ))
 }
 
+pub(crate) fn gunner_ray_target(
+    world: &mut World,
+    vehicle: u64,
+    client: u32,
+    weapon: u32,
+) -> Option<[f32; 3]> {
+    let number = world.resource::<Runtime>().entities.get(&vehicle)?.number;
+    let (camera, range) = {
+        let frame = crate::frame::FrameWorld::from_world(world);
+        let camera = frame
+            .client_meta(crate::ClientId(client))?
+            .linked_weapon_view?;
+        if camera.entity_num != number {
+            return None;
+        }
+        let range = frame
+            .combat_facts_for(weapon)
+            .map_or(GUNNER_RANGE, |facts| facts.bullet_range());
+        (camera, range.max(GUNNER_RANGE))
+    };
+    let direction = math_iw4::angle_vectors(camera.angles).0;
+    let far = std::array::from_fn(|i| camera.origin[i] + direction[i] * range);
+    let mut ignore = super::turrets::ignore_self(world, vehicle);
+    ignore.client = Some(crate::ClientId(client));
+    let stop = match super::natives::engine::entity_trace(
+        world,
+        camera.origin,
+        far,
+        crate::bullet_collision::MASK_SHOT,
+        ignore,
+    ) {
+        crate::bullet_collision::TraceOutcome::Hit { end, .. }
+        | crate::bullet_collision::TraceOutcome::Miss { end } => end,
+        _ => return None,
+    };
+    if let Some((_, distance, _)) = crate::voxel::mob_on_segment(camera.origin, stop) {
+        return Some(std::array::from_fn(|i| {
+            camera.origin[i] + direction[i] * distance
+        }));
+    }
+    Some(stop)
+}
 fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
     let Value::Object(id) = *receiver else {
         return Err("receiver is not a vehicle".into());
     };
-    let (weapon, owner, turret, heading) = {
+    let (weapon, owner, gunner, turret, heading) = {
         let heli = heli(world, receiver)?;
-        (heli.weapon, heli.owner, heli.turret, heli.heading)
+        (
+            heli.weapon,
+            heli.owner,
+            heli.gunner,
+            heli.turret,
+            heli.heading,
+        )
     };
     let weapon = weapon.ok_or("vehicle has no weapon")?;
     let tag = optional(args, 0, string)?.unwrap_or_default();
@@ -220,7 +275,10 @@ fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Va
     } else {
         target.or(turret)
     };
-    let point = aim.and_then(|aim| aim_point(world, aim));
+    let point = bullet
+        .then(|| gunner.and_then(|client| gunner_ray_target(world, id, client, weapon)))
+        .flatten()
+        .or_else(|| aim.and_then(|aim| aim_point(world, aim)));
     let dir = point
         .and_then(|p| {
             glam::Vec3::from_array(std::array::from_fn(|i| p[i] - from[i])).try_normalize()
@@ -428,6 +486,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             if let Some(plane) = runtime.planes.get_mut(&object) {
                 plane.origin = origin;
                 plane.velocity = [0.0; 3];
+                plane.authored_origin = None;
+                plane.presented_origin = None;
+                plane.flight_lift = 0.0;
             } else {
                 let vehicle = runtime
                     .vehicles
@@ -609,6 +670,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                     owner,
                     origin,
                     velocity: [0.0; 3],
+                    authored_origin: None,
+                    presented_origin: None,
+                    flight_lift: 0.0,
                     compass,
                 },
             );
@@ -960,20 +1024,112 @@ fn body_tilt(
     [heli.max_pitch * lean * forward, heli.max_roll * lean * side]
 }
 
-pub(crate) fn advance(world: &mut World) {
-    {
-        let mut runtime = world.resource_mut::<Runtime>();
-        let ids: Vec<u64> = runtime.planes.keys().copied().collect();
-        for id in ids {
-            if !runtime.entities.contains_key(&id) {
-                runtime.planes.remove(&id);
-                continue;
-            }
-            let origin = vec_field(&mut runtime, id, "origin");
-            let plane = runtime.planes.get_mut(&id).unwrap();
-            plane.velocity = std::array::from_fn(|i| (origin[i] - plane.origin[i]) / TICK_S);
-            plane.origin = origin;
+fn weapon_view_linked_to(world: &World, object: u64) -> bool {
+    world.resource::<Runtime>().players.values().any(|player| {
+        player.link.as_ref().is_some_and(|link| {
+            link.parent == object && link.view == super::players::LinkView::WeaponDelta
+        })
+    })
+}
+fn plane_flight_clearance(world: &mut World, id: u64) -> f32 {
+    let mut runtime = world.resource_mut::<Runtime>();
+    let model = runtime.object_field(id, "model");
+    let default = if model == Value::string("vehicle_b2_bomber") {
+        950.0
+    } else {
+        850.0
+    };
+    let candidates: Vec<_> = runtime.entities.keys().copied().collect();
+    for object in candidates {
+        if runtime.object_field(object, "targetname") != Value::string("airstrikeheight") {
+            continue;
         }
+        if let Value::Vector(origin) = runtime.object_field(object, "origin") {
+            let clearance = origin[2] - runtime.engine.map_center[2];
+            if clearance.is_finite() && clearance > 0.0 {
+                return clearance;
+            }
+        }
+    }
+    default
+}
+
+fn plane_owner_surface(world: &mut World, id: u64) -> Option<f32> {
+    let object = {
+        let runtime = world.resource::<Runtime>();
+        let owner = runtime.planes.get(&id)?.owner;
+        runtime.players.get(&owner)?.object
+    };
+    let Value::Vector(origin) = super::players::entity_field(world, object, "origin") else {
+        return None;
+    };
+    if origin.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let mins = std::array::from_fn(|i| origin[i] + crate::bullet_collision::PLAYER_MINS[i]);
+    let maxs = std::array::from_fn(|i| origin[i] + crate::bullet_collision::PLAYER_MAXS[i]);
+    let surface = crate::voxel::loaded_surface_z_under(mins, maxs)??;
+    surface.is_finite().then_some(surface)
+}
+
+pub(crate) fn advance(world: &mut World) {
+    let plane_ids: Vec<u64> = world.resource::<Runtime>().planes.keys().copied().collect();
+    for id in plane_ids {
+        let mut runtime = world.resource_mut::<Runtime>();
+        if !runtime.entities.contains_key(&id) {
+            runtime.planes.remove(&id);
+            continue;
+        }
+        let requested_origin = vec_field(&mut runtime, id, "origin");
+        let angles = vec_field(&mut runtime, id, "angles");
+        drop(runtime);
+        let linked = weapon_view_linked_to(world, id);
+        let (authored, lift) = {
+            let plane = &world.resource::<Runtime>().planes[&id];
+            let authored = if plane.presented_origin == Some(requested_origin) {
+                plane.authored_origin.unwrap_or(requested_origin)
+            } else {
+                requested_origin
+            };
+            (authored, plane.flight_lift)
+        };
+        let mut flight_lift = 0.0;
+        let origin = if crate::voxel::active() && linked {
+            super::mechanics::voxel_clear_origin_for_model(world, id, authored, angles)
+                .unwrap_or(authored)
+        } else if crate::voxel::active() {
+            let clearance = plane_flight_clearance(world, id);
+            let entry_surface = (lift == 0.0)
+                .then(|| plane_owner_surface(world, id))
+                .flatten();
+            let required = super::mechanics::voxel_flight_origin_for_model(
+                world,
+                id,
+                authored,
+                angles,
+                clearance,
+                entry_surface,
+            )
+            .map_or(lift, |origin| (origin[2] - authored[2]).max(lift));
+            flight_lift = required;
+            [authored[0], authored[1], authored[2] + required]
+        } else {
+            requested_origin
+        };
+        let mut runtime = world.resource_mut::<Runtime>();
+        if !runtime.entities.contains_key(&id) {
+            runtime.planes.remove(&id);
+            continue;
+        }
+        if origin != requested_origin {
+            runtime.set_object_field(id, "origin", Value::Vector(origin));
+        }
+        let plane = runtime.planes.get_mut(&id).unwrap();
+        plane.velocity = std::array::from_fn(|i| (origin[i] - plane.origin[i]) / TICK_S);
+        plane.origin = origin;
+        plane.authored_origin = crate::voxel::active().then_some(authored);
+        plane.presented_origin = crate::voxel::active().then_some(origin);
+        plane.flight_lift = flight_lift;
     }
     let ids: Vec<u64> = world
         .resource::<Runtime>()
@@ -983,6 +1139,12 @@ pub(crate) fn advance(world: &mut World) {
         .collect();
     let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
     for id in ids {
+        let camera_bounds = (crate::voxel::active() && weapon_view_linked_to(world, id))
+            .then(|| super::mechanics::model_local_bounds(world, id))
+            .flatten();
+        let camera_clearance = camera_bounds.and_then(|bounds| {
+            super::mechanics::linked_vehicle_camera_local(world, id).map(|camera| (bounds, camera))
+        });
         let (gunner, weapon) = world
             .resource::<Runtime>()
             .vehicles
@@ -999,8 +1161,19 @@ pub(crate) fn advance(world: &mut World) {
             runtime.vehicles.remove(&id);
             continue;
         }
-        let origin = vec_field(&mut runtime, id, "origin");
+        let observed_origin = vec_field(&mut runtime, id, "origin");
         let angles = vec_field(&mut runtime, id, "angles");
+        let heli = runtime.vehicles.get_mut(&id).unwrap();
+        let unchanged_since_clearance = camera_clearance.is_some()
+            && heli.presented_origin.is_some_and(|presented| {
+                (0..3).all(|axis| (observed_origin[axis] - presented[axis]).abs() < 0.01)
+            });
+        let origin = if unchanged_since_clearance {
+            heli.authored_origin.unwrap_or(observed_origin)
+        } else {
+            heli.authored_origin = Some(observed_origin);
+            observed_origin
+        };
         let look_at = runtime.vehicles[&id]
             .look_at
             .filter(|target| runtime.entities.contains_key(target));
@@ -1108,6 +1281,16 @@ pub(crate) fn advance(world: &mut World) {
             );
         }
         let [pitch, yaw, roll] = angles;
+        let authored_next = next;
+        if let Some((bounds, camera_local)) = camera_clearance {
+            next = super::mechanics::voxel_clear_origin_for_bounds_and_camera(
+                bounds,
+                next,
+                [pitch, yaw, roll],
+                Some(camera_local),
+            )
+            .unwrap_or(next);
+        }
         match control {
             Some((view, attack)) => {
                 heli.turret = Some(TurretAim::Point(std::array::from_fn(|i| {
@@ -1129,7 +1312,9 @@ pub(crate) fn advance(world: &mut World) {
             heli.on_target = true;
             notes.push("turret_on_target");
         }
-        heli.velocity = velocity;
+        heli.velocity = std::array::from_fn(|i| (next[i] - observed_origin[i]) / TICK_S);
+        heli.authored_origin = camera_clearance.map(|_| authored_next);
+        heli.presented_origin = camera_clearance.map(|_| next);
         let reached_node = (heli.path_running && heli.arrived)
             .then_some(heli.path_node)
             .flatten();

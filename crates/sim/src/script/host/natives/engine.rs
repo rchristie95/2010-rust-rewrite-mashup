@@ -475,6 +475,15 @@ fn fx_on_tag(
     args: &[Value],
     kind: entity_iw4::EntityEventKind,
 ) -> Result<Value, String> {
+    fx_on_tag_to(world, args, kind, crate::EventAudience::All)
+}
+
+fn fx_on_tag_to(
+    world: &mut World,
+    args: &[Value],
+    kind: entity_iw4::EntityEventKind,
+    audience: crate::EventAudience,
+) -> Result<Value, String> {
     let name = name(world, int(args, 0)?)?;
     let entity = arg(args, 1)?.clone();
     let tag = string(args, 2)?;
@@ -499,7 +508,7 @@ fn fx_on_tag(
             let tick = world.resource::<crate::step::StepRequest>().tick;
             crate::frame::FrameWorld::from_world(world).push_entity_event(
                 tick,
-                crate::EventAudience::All,
+                audience,
                 kind,
                 crate::EntityEventPayload {
                     number,
@@ -510,8 +519,9 @@ fn fx_on_tag(
                 },
             );
         }
-        _ if kind == entity_iw4::EntityEventKind::PLAY_FX_ON_TAG => world_event(
+        _ if kind == entity_iw4::EntityEventKind::PLAY_FX_ON_TAG => world_event_to(
             world,
+            audience,
             entity_iw4::EntityEventKind::PLAY_FX,
             index,
             origin,
@@ -529,10 +539,28 @@ fn world_event(
     origin: [f32; 3],
     direction: [f32; 3],
 ) {
+    world_event_to(
+        world,
+        crate::EventAudience::All,
+        kind,
+        index,
+        origin,
+        direction,
+    );
+}
+
+fn world_event_to(
+    world: &mut World,
+    audience: crate::EventAudience,
+    kind: entity_iw4::EntityEventKind,
+    index: u8,
+    origin: [f32; 3],
+    direction: [f32; 3],
+) {
     let tick = world.resource::<crate::step::StepRequest>().tick;
     crate::frame::FrameWorld::from_world(world).push_entity_event(
         tick,
-        crate::EventAudience::All,
+        audience,
         kind,
         crate::EntityEventPayload {
             number: i32::from(trace_iw4::ENTITYNUM_WORLD),
@@ -1517,6 +1545,37 @@ fn register_sound_and_fx(registry: &mut NativeRegistry) {
     registry.register(Function, "playfxontag", |world, _, args| {
         fx_on_tag(world, args, entity_iw4::EntityEventKind::PLAY_FX_ON_TAG)
     });
+    registry.register(Function, "playfxontagforclients", |world, _, args| {
+        if args.len() < 4 {
+            return Err(
+                "playfxontagforclients expects an effect, entity, tag and recipients".into(),
+            );
+        }
+        let mut clients = Vec::new();
+        for recipient in &args[3..] {
+            let recipients = match recipient {
+                Value::Array(_) => super::super::arrays::array_values(world, recipient)?,
+                _ => vec![recipient.clone()],
+            };
+            for recipient in recipients {
+                let client = crate::ClientId(super::player::player(world, &recipient)?);
+                if !clients.contains(&client) {
+                    clients.push(client);
+                }
+            }
+        }
+        let audience = match clients.as_slice() {
+            [] => return Ok(Value::Undefined),
+            [client] => crate::EventAudience::Client(*client),
+            _ => crate::EventAudience::Clients(clients),
+        };
+        fx_on_tag_to(
+            world,
+            args,
+            entity_iw4::EntityEventKind::PLAY_FX_ON_TAG,
+            audience,
+        )
+    });
     registry.register(Function, "stopfxontag", |world, _, args| {
         fx_on_tag(world, args, entity_iw4::EntityEventKind::STOP_FX_ON_TAG)
     });
@@ -1996,7 +2055,7 @@ fn register_level(registry: &mut NativeRegistry) {
         "setslowmotion",
         super::scene_effects::set_slow_motion,
     );
-    presented!["obituary", "playfxontagforclients", "setclientnamemode",];
+    presented!["obituary", "setclientnamemode",];
     macro_rules! unavailable {
         ($reason:literal: $($name:literal),* $(,)?) => {$(
             registry.register(Function, $name, |world, _, _| {
@@ -2081,11 +2140,42 @@ fn register_damage(registry: &mut NativeRegistry) {
         let inflictor = runtime(world).presence_of(receiver);
         radius_damage(world, inflictor, args)
     });
-    registry.register(Function, "glassradiusdamage", |_, _, args| {
-        vector(args, 0)?;
-        float(args, 1)?;
-        float(args, 2)?;
-        float(args, 3)?;
+    registry.register(Function, "glassradiusdamage", |world, receiver, args| {
+        let origin = vector(args, 0)?;
+        let radius = float(args, 1)?;
+        let max = float(args, 2)?;
+        let min = float(args, 3)?;
+        let client = match receiver {
+            Value::Object(object) => {
+                let mut runtime = runtime(world);
+                runtime
+                    .player_client(*object)
+                    .or_else(|| match runtime.object_field(*object, "owner") {
+                        Value::Object(owner) => runtime.player_client(owner),
+                        _ => None,
+                    })
+                    .map(crate::ClientId)
+            }
+            _ => None,
+        };
+        let credit = client.and_then(|client| {
+            crate::frame::FrameWorld::from_world(world)
+                .client_meta(client)
+                .map(|meta| crate::voxel::MobAttackCredit {
+                    client,
+                    life: meta.life_sequence,
+                })
+        });
+        let tick = world.resource::<crate::step::StepRequest>().tick;
+        crate::damage::apply_glass_radius_damage(
+            &mut crate::frame::FrameWorld::from_world(world),
+            tick,
+            origin,
+            radius,
+            max,
+            min,
+            credit,
+        );
         Ok(Value::Undefined)
     });
 }

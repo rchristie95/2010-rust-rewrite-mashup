@@ -389,18 +389,27 @@ pub(crate) fn select_location(
         .map(|slot| Value::Object(slot.object));
     if let (true, Some(receiver)) = (authority, receiver) {
         if pressed & buttons::LOCATION_SELECT != 0 {
-            let map = world.resource::<Runtime>().engine.minimap;
+            let map =
+                if crate::voxel::active() {
+                    crate::voxel::minimap()
+                } else {
+                    world.resource::<Runtime>().engine.minimap.map(|map| {
+                        hud_iw4::CompassMapBounds {
+                            upper_left: map.upper_left,
+                            north: map.north,
+                            world_size: map.size,
+                        }
+                    })
+                };
+            let Some(map) = map else {
+                cmd.buttons &= buttons::CROUCH | buttons::PRONE;
+                return;
+            };
             let loc = |byte: u8| (f32::from(byte as i8) + 128.0) / 255.0;
-            let location = map.map_or([0.0; 3], |map| {
-                let x = loc(cmd.selected_location[0]) * map.size[0];
-                let y = loc(cmd.selected_location[1]) * map.size[1];
-                [
-                    x * map.north[1] + map.upper_left[0] - y * map.north[0],
-                    map.upper_left[1] - x * map.north[0] - y * map.north[1],
-                    0.0,
-                ]
-            });
-            let north_yaw = map.map_or(0.0, |map| map.north[1].atan2(map.north[0]).to_degrees());
+            let point =
+                map.uv_to_world([loc(cmd.selected_location[0]), loc(cmd.selected_location[1])]);
+            let location = [point[0], point[1], 0.0];
+            let north_yaw = map.north[1].atan2(map.north[0]).to_degrees();
             let yaw = (f32::from(cmd.selected_location[2]) * (360.0 / 256.0) + north_yaw)
                 .rem_euclid(360.0);
             crate::script::runtime::raise(

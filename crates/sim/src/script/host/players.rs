@@ -1520,6 +1520,7 @@ pub(crate) fn link_player(world: &mut World, client: u32, link: PlayerLink) {
             ps.pm_type = playerstate_iw4::PM_TYPE_NORMAL_LINKED;
         }
         ps.velocity = [0.0; 3];
+        ps.link_flags &= !playerstate_iw4::LINK_FLAGS_WEAPON_VIEW_ONLY;
         if link.view == LinkView::WeaponDelta {
             ps.link_flags |= playerstate_iw4::LINK_FLAGS_WEAPON_VIEW_ONLY;
             ps.link_weapon_angles = ps.viewangles;
@@ -1546,8 +1547,8 @@ pub(crate) fn unlink_player(world: &mut World, client: u32) {
         if ps.pm_type == playerstate_iw4::PM_TYPE_NORMAL_LINKED {
             ps.pm_type = PM_TYPE_NORMAL;
         }
+        ps.link_flags &= !playerstate_iw4::LINK_FLAGS_WEAPON_VIEW_ONLY;
         if let Some(link) = link.filter(|link| link.view == LinkView::WeaponDelta) {
-            ps.link_flags &= !playerstate_iw4::LINK_FLAGS_WEAPON_VIEW_ONLY;
             if let Some(view) = link.restore_view {
                 for i in 0..3 {
                     ps.delta_angles[i] += angle_delta(view[i], ps.viewangles[i]);

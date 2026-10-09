@@ -779,9 +779,8 @@ pub fn extract_postfx(
             texture_slots: blood.texture_slots.clone(),
         });
     }
-    // The Minecraft world is graded by its own lightmap and fog, not by the
-    // film tweaks and glow of the map it stands in for.
-    extracted.vision = if minecraft.as_ref().is_some_and(|view| view.active) {
+    extracted.vision = if minecraft.as_ref().is_some_and(|view| view.active) && !film.script_forced
+    {
         None
     } else {
         film.current
@@ -952,6 +951,9 @@ pub fn extract_minecraft_world(
     mut clouds_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftClouds>)>>,
     mut cracks_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
 ) {
+    frame.thermal_active = main_world
+        .get_resource::<frame::ScreenEffectsView>()
+        .is_some_and(|effects| effects.ready && effects.thermal_active);
     let Some(mut view) =
         main_world.get_resource_mut::<render_anim::minecraft_world::MinecraftWorldView>()
     else {

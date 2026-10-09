@@ -2100,6 +2100,17 @@ fn publish_weapon_fire(
         .get(fire.entity)
         .ok()
         .is_some_and(|identity| gate.skip_self_fpv(identity.number()));
+    let controlled_vehicle_view = fire.event.event == entity_iw4::EntityEventKind::SV_FIRE_WEAPON
+        && eyes == fire.event.payload.attacker_entity_num
+        && presented
+            .snapshot()
+            .and_then(|snapshot| snapshot.meta.for_client(local.0))
+            .and_then(|meta| meta.linked_weapon_view)
+            .is_some_and(|view| view.entity_num == fire.event.payload.number)
+        && u16::try_from(fire.event.payload.attacker_entity_num)
+            .ok()
+            .is_some_and(|number| gate.is_player_view(number));
+    let player_view = player_view || controlled_vehicle_view;
     let last_shot = is_weapon_fire_last_shot_event(fire.event.event);
     let alias = identities.get(fire.entity).ok().and_then(|_| {
         let weapons = weapons.as_ref()?;
@@ -2229,10 +2240,12 @@ fn drain_weapon_fire_fx(
                 settings.third_person,
             ),
         };
-        let player_view = identities
-            .get(fire.entity)
-            .ok()
-            .is_some_and(|identity| gate.skip_self_fpv(identity.number()));
+        let vehicle_fire = fire.event.event == entity_iw4::EntityEventKind::SV_FIRE_WEAPON;
+        let player_view = !vehicle_fire
+            && identities
+                .get(fire.entity)
+                .ok()
+                .is_some_and(|identity| gate.skip_self_fpv(identity.number()));
         combat.last_fire_player_view = Some(i64::from(player_view));
         let last_shot = is_weapon_fire_last_shot_event(fire.event.event);
         combat.last_fire_lastshot = Some(i64::from(last_shot));
@@ -2272,7 +2285,7 @@ fn drain_weapon_fire_fx(
                 msec,
                 &verdicts,
             ) {
-                if try_play_weapon_fx_bolted(
+                let bolted = try_play_weapon_fx_bolted(
                     &mut host.0,
                     &catalog.0,
                     &mut elem_infos.0,
@@ -2280,9 +2293,24 @@ fn drain_weapon_fire_fx(
                     flash_target,
                     &mut muzzle_played,
                     fx_world.view().as_ref().map(|s| s as &dyn FxScene),
-                ) {
+                );
+                let at_muzzle = !bolted
+                    && vehicle_fire
+                    && try_play_weapon_fx_at_origin(
+                        &mut host.0,
+                        &catalog.0,
+                        &mut elem_infos.0,
+                        muzzle_name,
+                        fire.event.payload.origin,
+                        math_iw4::angles_to_axis(fire.event.payload.direction),
+                        &mut muzzle_played,
+                        fx_world.view().as_ref().map(|s| s as &dyn FxScene),
+                    );
+                if bolted || at_muzzle {
                     occurrences.presented(&fire.event, FireFxOccurrence::Muzzle, msec);
-                    cursor.muzzle_bolted = cursor.muzzle_bolted.saturating_add(1);
+                    if bolted {
+                        cursor.muzzle_bolted = cursor.muzzle_bolted.saturating_add(1);
+                    }
                 } else {
                     muzzle_gap = muzzle_gap.saturating_add(1);
                 }

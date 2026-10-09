@@ -173,7 +173,10 @@ pub(crate) fn select_usables(world: &mut World) {
     for client in clients {
         let id = ClientId(client);
         if !frame.client_meta(id).is_some_and(|m| {
-            m.lifecycle == crate::ClientLifecycle::Alive && !m.controls.usability_disabled
+            m.lifecycle == crate::ClientLifecycle::Alive
+                && !m.controls.usability_disabled
+                && !m.controls.linked
+                && m.remote_missile.is_none()
         }) {
             continue;
         }

@@ -563,7 +563,11 @@ fn eligible(runtime: &Runtime, frame: &FrameWorld, trigger: u64, client: u32, us
             && (!using
                 || frame
                     .client_meta(crate::ClientId(client))
-                    .is_some_and(|meta| !meta.controls.usability_disabled)
+                    .is_some_and(|meta| {
+                        !meta.controls.usability_disabled
+                            && !meta.controls.linked
+                            && meta.remote_missile.is_none()
+                    })
                     && entity
                         .usable
                         .as_ref()

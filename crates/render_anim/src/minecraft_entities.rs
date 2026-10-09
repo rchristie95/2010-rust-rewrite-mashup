@@ -7,24 +7,24 @@
 //! (a hundred MW2 health to Minecraft's twenty), and mobs hurt the player
 //! the other way round.
 use glam::{DVec3, Vec3};
+use minecraft_terrain::client_mobs::{ClientMobs, server_mobs};
 use minecraft_terrain::lighting::SkyLight;
+use minecraft_terrain::mesh::ItemVisuals;
 use minecraft_terrain::mesh::{Atlas, ChunkMesh};
+use minecraft_terrain::pack::PackStack;
+use minecraft_terrain::poof_particles::PoofParticles;
+use minecraft_terrain::portal_particles::PortalParticles;
 use minecraft_terrain::scene::{Block, HandcraftedScene, Scene};
+use minecraft_terrain::server::{EntitySnapshot, ServerItem};
 use minecraft_terrain::server::{PlayerEdit, ServerHandle, ServerSim, TickInput};
 use minecraft_terrain::terrain::TerrainStream;
-use minecraft_terrain::client_mobs::{ClientMobs, server_mobs};
-use minecraft_terrain::mesh::ItemVisuals;
-use minecraft_terrain::server::{EntitySnapshot, ServerItem};
+use minecraftoss_entities::tempt::PlayerCandidate;
+use minecraftoss_entities::world::{EntityWorld, MobHit, PlayerHitKind};
 use minecraftoss_player::inventory::{Inventory, ItemStack};
 use minecraftoss_player::items::{ItemEntity, WorldItems};
 use minecraftoss_player::loot::LootBook;
 use minecraftoss_player::rng::XoroshiroRandom;
 use std::collections::{HashMap, HashSet};
-use minecraft_terrain::pack::PackStack;
-use minecraft_terrain::poof_particles::PoofParticles;
-use minecraft_terrain::portal_particles::PortalParticles;
-use minecraftoss_entities::tempt::PlayerCandidate;
-use minecraftoss_entities::world::{EntityWorld, MobHit, PlayerHitKind};
 
 const TICK_SECONDS: f64 = 1.0 / 20.0;
 /// Minecraft health per MW2 health.
@@ -71,11 +71,7 @@ pub(crate) struct Entities {
     feedback: Vec<(sim::voxel::MobAttackCredit, u32)>,
 }
 
-/// What bullets and blasts count as for block loot: vanilla drops nothing
-/// from stone or ores broken bare-handed.
 const LOOT_TOOL: &str = "minecraft:diamond_pickaxe";
-/// TNT's power: a blast drops each block's loot one time in this many.
-const BLAST_POWER: f32 = 4.0;
 
 /// The mobs drawn this frame: entity models (cut out, back-face culled,
 /// translucent) and their shadows, in `mesh::Vertex`s; and what goes with
@@ -101,7 +97,11 @@ pub(crate) struct PlayerView {
 
 impl Entities {
     pub(crate) fn new(stream: &TerrainStream, seed: i64) -> Self {
-        let sim = ServerSim::new(stream.world_gen(), stream.states.clone(), "minecraft:overworld");
+        let sim = ServerSim::new(
+            stream.world_gen(),
+            stream.states.clone(),
+            "minecraft:overworld",
+        );
         let mut server = ServerHandle::spawn(sim);
         // Mob and block loot and the recipes (stack sizes), from the game's
         // data JAR when MinecraftOSS has one.
@@ -161,22 +161,28 @@ impl Entities {
         self.server.unload_chunk(pos);
     }
 
-    /// Block loot for what the weapons broke, dropped as vanilla drops it
-    /// (`Block.popResource`); a blast keeps each drop one time in four.
-    pub(crate) fn drop_blocks(&mut self, broken: &[((i32, i32, i32), Block, bool)]) {
+    pub(crate) fn drop_blocks(&mut self, broken: &[((i32, i32, i32), Block, bool, bool)]) {
         let Some(loot) = self.loot.as_ref() else {
             return;
         };
         let tool = ItemStack::new(LOOT_TOOL, 1);
-        for (pos, block, blast) in broken {
-            let block = minecraftoss_player::Block { id: block.id.key(), properties: block.properties.clone() };
-            let Some(drops) = loot.roll_drops_named(&block, Some(&tool), self.seed as u64, &mut self.loot_sequences) else {
+        for (pos, block, _, drop_items) in broken {
+            if !drop_items {
+                continue;
+            }
+            let block = minecraftoss_player::Block {
+                id: block.id.key(),
+                properties: block.properties.clone(),
+            };
+            let Some(drops) = loot.roll_drops_named(
+                &block,
+                Some(&tool),
+                self.seed as u64,
+                &mut self.loot_sequences,
+            ) else {
                 continue;
             };
             for mut drop in drops {
-                if *blast && self.random.next_float() >= 1.0 / BLAST_POWER {
-                    continue;
-                }
                 if drop.components.is_none() {
                     drop.max = drop.max.min(self.inventory.recipes.max_stack(&drop.id));
                 }
@@ -193,7 +199,10 @@ impl Entities {
         let entities = std::mem::take(&mut self.world_items.entities);
         let to_hand: Vec<ItemEntity> = entities
             .iter()
-            .filter(|e| !self.server_item_ids.contains(&e.entity_id) && !self.server_handed.contains_key(&e.entity_id))
+            .filter(|e| {
+                !self.server_item_ids.contains(&e.entity_id)
+                    && !self.server_handed.contains_key(&e.entity_id)
+            })
             .cloned()
             .collect();
         for entity in &to_hand {
@@ -207,26 +216,41 @@ impl Entities {
                 i32::from(entity.pickup_delay),
                 entity.age as i32,
             );
-            self.server_handed.insert(entity.entity_id, (self.server.sent(), entity.clone()));
+            self.server_handed
+                .insert(entity.entity_id, (self.server.sent(), entity.clone()));
         }
-        let previous: HashMap<u32, ItemEntity> = entities.into_iter().map(|e| (e.entity_id, e)).collect();
+        let previous: HashMap<u32, ItemEntity> =
+            entities.into_iter().map(|e| (e.entity_id, e)).collect();
         let target = feet + DVec3::Y * 0.81;
         self.world_items.tick_pickup_effects(target);
         for (id, position, item, count, components) in std::mem::take(&mut self.server_picked) {
             let recipes = self.inventory.recipes.clone();
             let make_stack = |item: &str, count: i32| {
                 let mut stack = ItemStack::new(item, count.clamp(0, 255) as u8);
-                stack.components = components.as_deref().and_then(|c| serde_json::from_str(c).ok());
+                stack.components = components
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str(c).ok());
                 if stack.components.is_none() {
                     stack.max = stack.max.min(recipes.max_stack(item));
                 }
                 stack
             };
-            let taken = match self.inventory.add_item(make_stack(&item, count), self.selected) {
+            let taken = match self
+                .inventory
+                .add_item(make_stack(&item, count), self.selected)
+            {
                 None => count,
                 Some(rest) => {
                     let rest_count = i32::from(rest.count);
-                    self.server.spawn_item(&item, rest_count, components.as_deref(), feet.to_array(), [0.0; 3], 0, 0);
+                    self.server.spawn_item(
+                        &item,
+                        rest_count,
+                        components.as_deref(),
+                        feet.to_array(),
+                        [0.0; 3],
+                        0,
+                        0,
+                    );
                     count - rest_count
                 }
             };
@@ -234,17 +258,20 @@ impl Entities {
                 continue;
             }
             let transfer = make_stack(&item, taken);
-            let snapshot = previous.get(&(id as u32)).cloned().unwrap_or_else(|| ItemEntity {
-                entity_id: id as u32,
-                stack: transfer.clone(),
-                position: DVec3::from_array(position),
-                previous_position: DVec3::from_array(position),
-                velocity: DVec3::ZERO,
-                age: 0,
-                bob_offset: bob_offset(id),
-                pickup_delay: 0,
-                on_ground: true,
-            });
+            let snapshot = previous
+                .get(&(id as u32))
+                .cloned()
+                .unwrap_or_else(|| ItemEntity {
+                    entity_id: id as u32,
+                    stack: transfer.clone(),
+                    position: DVec3::from_array(position),
+                    previous_position: DVec3::from_array(position),
+                    velocity: DVec3::ZERO,
+                    age: 0,
+                    bob_offset: bob_offset(id),
+                    pickup_delay: 0,
+                    on_ground: true,
+                });
             self.world_items.note_pickup(snapshot, target, transfer);
         }
         let Some(snapshot) = self.server_snapshot.take() else {
@@ -258,7 +285,10 @@ impl Entities {
             .into_iter()
             .map(|item: ServerItem| {
                 let mut stack = ItemStack::new(&item.item, item.count.clamp(0, 255) as u8);
-                stack.components = item.components.as_deref().and_then(|c| serde_json::from_str(c).ok());
+                stack.components = item
+                    .components
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str(c).ok());
                 if stack.components.is_none() {
                     stack.max = stack.max.min(recipes.max_stack(&item.item));
                 }
@@ -275,7 +305,12 @@ impl Entities {
                 }
             })
             .collect();
-        self.server_item_ids = self.world_items.entities.iter().map(|e| e.entity_id).collect();
+        self.server_item_ids = self
+            .world_items
+            .entities
+            .iter()
+            .map(|e| e.entity_id)
+            .collect();
         let handled = self.server_handled;
         self.server_handed.retain(|_, (sent, _)| *sent > handled);
         for (_, entity) in self.server_handed.values() {
@@ -294,13 +329,25 @@ impl Entities {
         light: &SkyLight,
     ) -> ChunkMesh {
         let mut mesh = ChunkMesh::default();
-        let _ = self.items.append_posed_blocks(&mut mesh, &[(pose, light_at, id.to_owned())], packs, atlas, light);
+        let _ = self.items.append_posed_blocks(
+            &mut mesh,
+            &[(pose, light_at, id.to_owned())],
+            packs,
+            atlas,
+            light,
+        );
         mesh
     }
 
     /// A fist on the mob the player looks at within reach (one damage, as
     /// an empty hand deals).
-    pub(crate) fn punch(&mut self, eye: DVec3, look: DVec3, yaw: f32, credit: sim::voxel::MobAttackCredit) -> bool {
+    pub(crate) fn punch(
+        &mut self,
+        eye: DVec3,
+        look: DVec3,
+        yaw: f32,
+        credit: sim::voxel::MobAttackCredit,
+    ) -> bool {
         let Some((hit, _)) = self.world.mob_on_ray(eye, look, 3.0) else {
             return false;
         };
@@ -316,7 +363,13 @@ impl Entities {
         };
         self.next_attack = self.next_attack.wrapping_add(1);
         self.attacks.insert(self.next_attack, credit);
-        self.server.credited_mob_attack(self.next_attack, hit, attack, &self.inventory.clone(), self.selected);
+        self.server.credited_mob_attack(
+            self.next_attack,
+            hit,
+            attack,
+            &self.inventory.clone(),
+            self.selected,
+        );
         true
     }
 
@@ -331,15 +384,54 @@ impl Entities {
     }
 
     /// Blocks the player's weapons broke, for the level the mobs walk in.
-    pub(crate) fn broke(&mut self, scene: &HandcraftedScene, positions: &[(i32, i32, i32)]) {
-        for &pos in positions {
-            self.server.player_edit(scene, pos, PlayerEdit::Break);
+    pub(crate) fn broke(
+        &mut self,
+        scene: &HandcraftedScene,
+        broken: &[((i32, i32, i32), Block, bool, bool)],
+    ) {
+        let mut without_drops = Vec::new();
+        for (pos, _, _, drop_items) in broken {
+            if *drop_items {
+                self.server.player_edit(scene, *pos, PlayerEdit::Break);
+            } else {
+                without_drops.push(*pos);
+            }
         }
+        if !without_drops.is_empty()
+            && let Some(states) = scene.states()
+        {
+            let positions: HashSet<_> = without_drops.iter().copied().collect();
+            let keep = |entity: &ItemEntity| {
+                if states
+                    .registries()
+                    .blocks
+                    .parse_state(&entity.stack.id)
+                    .is_err()
+                {
+                    return true;
+                }
+                let [x, y, z] = entity.position.to_array().map(|v| v.floor() as i32);
+                !(-1..=1).any(|dx| {
+                    (-1..=1)
+                        .any(|dy| (-1..=1).any(|dz| positions.contains(&(x + dx, y + dy, z + dz))))
+                })
+            };
+            self.world_items.entities.retain(&keep);
+            self.server_handed.retain(|_, (_, entity)| keep(entity));
+        }
+        self.server.destroy_blocks_without_drops(without_drops);
     }
 
     /// A bullet on a mob: an attack with the bullet's damage from where it
     /// was fired.
-    pub(crate) fn shoot(&mut self, key: u64, damage: f32, from: [f64; 3], yaw: f32, credit: sim::voxel::MobAttackCredit) {
+    pub(crate) fn shoot(
+        &mut self,
+        key: u64,
+        damage: f32,
+        from: [f64; 3],
+        yaw: f32,
+        credit: Option<sim::voxel::MobAttackCredit>,
+    ) {
         let Some(hit) = decode(key) else {
             return;
         };
@@ -353,9 +445,20 @@ impl Entities {
             can_critical: false,
             can_sweep: false,
         };
-        self.next_attack = self.next_attack.wrapping_add(1);
-        self.attacks.insert(self.next_attack, credit);
-        self.server.credited_mob_attack(self.next_attack, hit, attack, &Inventory::default(), 0);
+        if let Some(credit) = credit {
+            self.next_attack = self.next_attack.wrapping_add(1);
+            self.attacks.insert(self.next_attack, credit);
+            self.server.credited_mob_attack(
+                self.next_attack,
+                hit,
+                attack,
+                &Inventory::default(),
+                0,
+            );
+        } else {
+            self.server
+                .mob_action(hit, Some(attack), &Inventory::default(), 0, false);
+        }
     }
 
     pub(crate) fn take_feedback(&mut self) -> Vec<(sim::voxel::MobAttackCredit, u32)> {
@@ -370,7 +473,10 @@ impl Entities {
         day_ticks: i64,
         bright_outside: bool,
         player: &PlayerView,
-    ) -> (Vec<((i32, i32, i32), Option<Block>)>, Vec<(i32, Option<[f64; 3]>)>) {
+    ) -> (
+        Vec<((i32, i32, i32), Option<Block>)>,
+        Vec<(i32, Option<[f64; 3]>)>,
+    ) {
         self.clock += dt;
         let ticked = self.clock >= TICK_SECONDS;
         if ticked {
@@ -411,7 +517,11 @@ impl Entities {
             };
             self.server.tick(TickInput {
                 day_ticks,
-                players: if player.alive { vec![player.feet] } else { Vec::new() },
+                players: if player.alive {
+                    vec![player.feet]
+                } else {
+                    Vec::new()
+                },
                 difficulty: 2,
                 simulation_center: center,
                 simulation_distance: 8,
@@ -450,13 +560,30 @@ impl Entities {
             self.server_picked.extend(output.picked);
             changes.extend(output.changes);
             for sound in &output.mob_sounds {
-                self.sounds.push((sound.event.clone(), sound.position, sound.volume, sound.pitch));
+                self.sounds.push((
+                    sound.event.clone(),
+                    sound.position,
+                    sound.volume,
+                    sound.pitch,
+                ));
             }
-            for sound in output.mob_results.iter().flat_map(|result| result.sounds.iter()) {
-                self.sounds.push((sound.event.clone(), sound.position, sound.volume, sound.pitch));
+            for sound in output
+                .mob_results
+                .iter()
+                .flat_map(|result| result.sounds.iter())
+            {
+                self.sounds.push((
+                    sound.event.clone(),
+                    sound.position,
+                    sound.volume,
+                    sound.pitch,
+                ));
             }
             for result in &output.mob_results {
-                if let Some(credit) = result.request.and_then(|request| self.attacks.remove(&request)) {
+                if let Some(credit) = result
+                    .request
+                    .and_then(|request| self.attacks.remove(&request))
+                {
                     if result.hurt {
                         self.feedback.push((credit, result.kills));
                     }
@@ -464,8 +591,14 @@ impl Entities {
             }
             // `ServerExplosion`'s sound: loud, pitched down.
             for blast in &output.explosions {
-                let pitch = (1.0 + (self.random.next_float() - self.random.next_float()) * 0.2) * 0.7;
-                self.sounds.push(("minecraft:entity.generic.explode".to_owned(), blast.position, 4.0, pitch));
+                let pitch =
+                    (1.0 + (self.random.next_float() - self.random.next_float()) * 0.2) * 0.7;
+                self.sounds.push((
+                    "minecraft:entity.generic.explode".to_owned(),
+                    blast.position,
+                    4.0,
+                    pitch,
+                ));
             }
             if let Some(mobs) = output.mobs {
                 self.world = *mobs;
@@ -473,7 +606,11 @@ impl Entities {
                     self.poof.spawn(feet, width, height);
                 }
             }
-            for hit in output.player_hits.into_iter().filter(|h| h.player_id == PLAYER) {
+            for hit in output
+                .player_hits
+                .into_iter()
+                .filter(|h| h.player_id == PLAYER)
+            {
                 let from = match hit.kind {
                     PlayerHitKind::Melee { attacker, .. } => Some(attacker.to_array()),
                     _ => None,
@@ -485,8 +622,14 @@ impl Entities {
             self.server_items_tick(DVec3::from_array(player.feet));
             // `ItemEntity.playerTouch`'s pickup pop.
             for _ in 0..self.world_items.take_pickup_sounds() {
-                let pitch = ((self.random.next_float() - self.random.next_float()) * 0.7 + 1.0) * 2.0;
-                self.sounds.push(("minecraft:entity.item.pickup".to_owned(), DVec3::from_array(player.feet), 0.2, pitch));
+                let pitch =
+                    ((self.random.next_float() - self.random.next_float()) * 0.7 + 1.0) * 2.0;
+                self.sounds.push((
+                    "minecraft:entity.item.pickup".to_owned(),
+                    DVec3::from_array(player.feet),
+                    0.2,
+                    pitch,
+                ));
             }
         }
         (changes, hits)
@@ -501,7 +644,14 @@ impl Entities {
             let half = f64::from(body.width) * 0.5;
             out.push((
                 encode(hit),
-                [p.x - half, p.y, p.z - half, p.x + half, p.y + f64::from(body.height), p.z + half],
+                [
+                    p.x - half,
+                    p.y,
+                    p.z - half,
+                    p.x + half,
+                    p.y + f64::from(body.height),
+                    p.z + half,
+                ],
             ));
         };
         for e in w.bats().iter().filter(|e| e.bat.health > 0.0) {
@@ -513,7 +663,11 @@ impl Entities {
         for e in w.skeletons().iter().filter(|e| e.skeleton.health > 0.0) {
             add(MobHit::Skeleton(e.id), &e.skeleton.body);
         }
-        for e in w.creepers().iter().filter(|e| e.creeper.health > 0.0 && !e.creeper.exploded) {
+        for e in w
+            .creepers()
+            .iter()
+            .filter(|e| e.creeper.health > 0.0 && !e.creeper.exploded)
+        {
             add(MobHit::Creeper(e.id), &e.creeper.body);
         }
         for e in w.spiders().iter().filter(|e| e.spider.health > 0.0) {
@@ -538,7 +692,11 @@ impl Entities {
             add(MobHit::Villager(e.id), &e.villager.body);
         }
         for e in w.cows().iter().filter(|e| e.cow.health > 0.0) {
-            let hit = if e.mooshroom.is_some() { MobHit::Mooshroom(e.id) } else { MobHit::Cow(e.id) };
+            let hit = if e.mooshroom.is_some() {
+                MobHit::Mooshroom(e.id)
+            } else {
+                MobHit::Cow(e.id)
+            };
             add(hit, &e.cow.body);
         }
         for e in w.sheep().iter().filter(|e| e.health > 0.0) {
@@ -578,16 +736,78 @@ impl Entities {
         let poses = &self.client;
         let partial = (self.clock / TICK_SECONDS).clamp(0.0, 1.0) as f32;
         let mut out = MobMeshes::default();
-        cow_render::append_cows(&mut out.models, w.cows().iter(), poses, atlas, light, partial);
-        sheep_render::append_sheep(&mut out.models, w.sheep().iter(), poses, atlas, light, partial);
-        pig_render::append_pigs(&mut out.models, w.pigs().iter(), poses, atlas, light, partial);
-        chicken_render::append_chickens(&mut out.models, w.chickens().iter(), poses, atlas, light, partial);
-        bat_render::append_bats(&mut out.culled, w.bats().iter(), poses, atlas, light, partial);
-        let zombie_items = zombie_render::append_zombies(&mut out.models, w.zombies().iter(), poses, atlas, light, partial);
-        creeper_render::append_creepers(&mut out.models, w.creepers().iter(), poses, atlas, light, partial);
-        spider_render::append_spiders(&mut out.models, w.spiders().iter(), poses, atlas, light, partial);
-        let skeleton_items =
-            skeleton_render::append_skeletons(&mut out.models, w.skeletons().iter(), poses, atlas, light, partial);
+        cow_render::append_cows(
+            &mut out.models,
+            w.cows().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        sheep_render::append_sheep(
+            &mut out.models,
+            w.sheep().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        pig_render::append_pigs(
+            &mut out.models,
+            w.pigs().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        chicken_render::append_chickens(
+            &mut out.models,
+            w.chickens().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        bat_render::append_bats(
+            &mut out.culled,
+            w.bats().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        let zombie_items = zombie_render::append_zombies(
+            &mut out.models,
+            w.zombies().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        creeper_render::append_creepers(
+            &mut out.models,
+            w.creepers().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        spider_render::append_spiders(
+            &mut out.models,
+            w.spiders().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        let skeleton_items = skeleton_render::append_skeletons(
+            &mut out.models,
+            w.skeletons().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
         let villager_items = villager_render::append_villagers(
             &mut out.models,
             w.villagers().iter(),
@@ -597,8 +817,24 @@ impl Entities {
             light,
             partial,
         );
-        horse_render::append_horses(&mut out.models, &mut out.translucent, w.cows().iter(), poses, atlas, light, partial);
-        slime_render::append_slimes(&mut out.models, &mut out.translucent, w.slimes().iter(), poses, atlas, light, partial);
+        horse_render::append_horses(
+            &mut out.models,
+            &mut out.translucent,
+            w.cows().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        slime_render::append_slimes(
+            &mut out.models,
+            &mut out.translucent,
+            w.slimes().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
         let carried = enderman_render::append_endermen(
             &mut out.models,
             w.endermen().iter(),
@@ -608,43 +844,90 @@ impl Entities {
             partial,
             self.ticks.rotate_left(32) ^ (partial.to_bits() as u64),
         );
-        let witch_items = witch_render::append_witches(&mut out.models, w.witches().iter(), poses, atlas, light, partial);
-        let poppies = golem_render::append_iron_golems(&mut out.models, w.iron_golems().iter(), poses, atlas, light, partial);
-        wolf_render::append_wolves(&mut out.models, w.wolves().iter(), poses, atlas, light, partial, w.game_time());
+        let witch_items = witch_render::append_witches(
+            &mut out.models,
+            w.witches().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        let poppies = golem_render::append_iron_golems(
+            &mut out.models,
+            w.iron_golems().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+        );
+        wolf_render::append_wolves(
+            &mut out.models,
+            w.wolves().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+            w.game_time(),
+        );
         flame_render::append_flames(
             &mut out.items,
             w.burning()
                 .into_iter()
-                .map(|(previous, now, width, height)| (previous.lerp(now, f64::from(partial)), width, height)),
+                .map(|(previous, now, width, height)| {
+                    (previous.lerp(now, f64::from(partial)), width, height)
+                }),
             atlas,
             forward,
             light,
         );
         witch_render::append_potions(
             &mut out.items,
-            w.potions()
-                .iter()
-                .filter(|p| p.potion.alive)
-                .map(|p| (p, p.previous_position.lerp(p.potion.position, f64::from(partial)))),
+            w.potions().iter().filter(|p| p.potion.alive).map(|p| {
+                (
+                    p,
+                    p.previous_position
+                        .lerp(p.potion.position, f64::from(partial)),
+                )
+            }),
             atlas,
             forward,
             light,
         );
-        if let Ok(items) = self.items.mesh(&self.world_items, packs, atlas, light, partial) {
+        if let Ok(items) = self
+            .items
+            .mesh(&self.world_items, packs, atlas, light, partial)
+        {
             let base = out.items.vertices.len() as u32;
             out.items.vertices.extend(items.vertices);
-            out.items.indices.extend(items.indices.iter().map(|i| i + base));
+            out.items
+                .indices
+                .extend(items.indices.iter().map(|i| i + base));
         }
-        self.poof.append_mesh(&mut out.items, atlas, forward, partial, light);
-        self.portal.append_mesh(&mut out.items, atlas, forward, partial, light);
-        let held: Vec<_> =
-            skeleton_items.into_iter().chain(zombie_items).chain(villager_items).chain(witch_items).collect();
-        let _ = self.items.append_held_items(&mut out.items, &held, packs, atlas, light);
+        self.poof
+            .append_mesh(&mut out.items, atlas, forward, partial, light);
+        self.portal
+            .append_mesh(&mut out.items, atlas, forward, partial, light);
+        let held: Vec<_> = skeleton_items
+            .into_iter()
+            .chain(zombie_items)
+            .chain(villager_items)
+            .chain(witch_items)
+            .collect();
+        let _ = self
+            .items
+            .append_held_items(&mut out.items, &held, packs, atlas, light);
         let carried: Vec<_> = carried.into_iter().chain(poppies).collect();
-        let _ = self.items.append_posed_blocks(&mut out.items, &carried, packs, atlas, light);
+        let _ = self
+            .items
+            .append_posed_blocks(&mut out.items, &carried, packs, atlas, light);
         // Their shadows, at `getMaxLocalRawBrightness`.
         let casters = client_mobs::shadow_casters(w, poses, camera, partial);
-        let raw = |pos: (i32, i32, i32)| light.get(pos).saturating_sub(sky_darken).max(light.get_block(pos));
+        let raw = |pos: (i32, i32, i32)| {
+            light
+                .get(pos)
+                .saturating_sub(sky_darken)
+                .max(light.get_block(pos))
+        };
         if let Ok(shadows) = mesh::entity_shadows(&casters, scene, atlas, &raw, 0.0) {
             out.shadows = shadows;
         }
@@ -654,7 +937,10 @@ impl Entities {
 
 /// The viewer's `server_bob_offset`: a server item's bob phase from its id.
 fn bob_offset(id: i32) -> f32 {
-    let hash = (id as u32).wrapping_mul(0x9e37_79b9).rotate_left(13).wrapping_mul(0x85eb_ca6b);
+    let hash = (id as u32)
+        .wrapping_mul(0x9e37_79b9)
+        .rotate_left(13)
+        .wrapping_mul(0x85eb_ca6b);
     hash as f32 / u32::MAX as f32 * std::f32::consts::TAU
 }
 
@@ -668,7 +954,11 @@ pub(crate) fn data_jar() -> Option<std::path::PathBuf> {
     }
     let root = root.join("harness/.gradle/loom-cache/minecraftMaven/net/minecraft");
     for entry in std::fs::read_dir(root).ok()?.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with("minecraft-common-") {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("minecraft-common-")
+        {
             continue;
         }
         for jar in std::fs::read_dir(entry.path().join("26.3")).ok()?.flatten() {

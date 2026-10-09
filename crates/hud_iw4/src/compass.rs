@@ -9,6 +9,27 @@ pub struct CompassMapBounds {
     pub north: [f32; 2],
 }
 
+impl CompassMapBounds {
+    #[must_use]
+    pub fn world_to_uv(self, world: [f32; 2]) -> [f32; 2] {
+        let d = [world[0] - self.upper_left[0], world[1] - self.upper_left[1]];
+        [
+            (self.north[1] * d[0] - self.north[0] * d[1]) / self.world_size[0],
+            (-self.north[0] * d[0] - self.north[1] * d[1]) / self.world_size[1],
+        ]
+    }
+
+    #[must_use]
+    pub fn uv_to_world(self, uv: [f32; 2]) -> [f32; 2] {
+        let east = uv[0] * self.world_size[0];
+        let south = uv[1] * self.world_size[1];
+        [
+            self.upper_left[0] + east * self.north[1] - south * self.north[0],
+            self.upper_left[1] - east * self.north[0] - south * self.north[1],
+        ]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompassMapUvWindow {
     pub center: [f32; 2],
@@ -138,18 +159,7 @@ pub fn compass_partial_map_uv(
     view_xy: [f32; 2],
     compass_max_range: f32,
 ) -> CompassMapUvWindow {
-    let east = [bounds.north[1], -bounds.north[0]];
-    let south = [-bounds.north[0], -bounds.north[1]];
-    let delta = [
-        view_xy[0] - bounds.upper_left[0],
-        view_xy[1] - bounds.upper_left[1],
-    ];
-    let delta_east = east[0] * delta[0] + east[1] * delta[1];
-    let delta_south = south[0] * delta[0] + south[1] * delta[1];
-    let tex_center = [
-        delta_east / bounds.world_size[0],
-        delta_south / bounds.world_size[1],
-    ];
+    let tex_center = bounds.world_to_uv(view_xy);
 
     let half_range = compass_max_range * 0.5;
     let (tex_radius, scale_s, scale_t) = if bounds.world_size[1] >= bounds.world_size[0] {

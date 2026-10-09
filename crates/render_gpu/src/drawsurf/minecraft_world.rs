@@ -8,9 +8,7 @@ use std::sync::Arc;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::render::render_resource::binding_types::{
-    sampler, texture_2d, uniform_buffer_sized,
-};
+use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::{
     AddressMode, BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource, BlendState,
     Buffer, BufferBinding, BufferDescriptor, BufferInitDescriptor, BufferUsages, ColorTargetState,
@@ -59,6 +57,7 @@ pub struct MinecraftClouds {
 #[derive(Resource, Default)]
 pub struct MinecraftWorldFrame {
     pub active: bool,
+    pub thermal_active: bool,
     pub origin: [f64; 3],
     pub view_distance: f32,
     pub atlas: Option<Arc<MinecraftAtlasImage>>,
@@ -100,6 +99,7 @@ struct TerrainView {
     view: [f32; 4],
     /// The block at map origin.
     origin: [f32; 4],
+    thermal: [f32; 4],
     environment: [[f32; 4]; 16],
 }
 
@@ -145,7 +145,10 @@ pub(super) fn register(app: &mut App) {
     render_app
         .init_resource::<MinecraftWorldFrame>()
         .init_resource::<TerrainGpu>()
-        .add_systems(Render, prepare_terrain.in_set(RenderSystems::PrepareResources))
+        .add_systems(
+            Render,
+            prepare_terrain.in_set(RenderSystems::PrepareResources),
+        )
         .add_systems(
             Core3d,
             draw_terrain
@@ -208,7 +211,10 @@ fn prepare_terrain(
         gpu.generation = frame.generation;
     }
     if let Some(atlas) = frame.atlas.clone()
-        && gpu.atlas.as_ref().is_none_or(|(held, _)| !Arc::ptr_eq(held, &atlas))
+        && gpu
+            .atlas
+            .as_ref()
+            .is_none_or(|(held, _)| !Arc::ptr_eq(held, &atlas))
     {
         let view = upload_atlas(&device, &queue, &atlas);
         gpu.atlas = Some((atlas, view));
@@ -309,7 +315,12 @@ fn prepare_terrain(
         )
     });
     match frame.clouds.clone() {
-        Some(clouds) if gpu.clouds.as_ref().is_none_or(|(held, ..)| !Arc::ptr_eq(held, &clouds)) => {
+        Some(clouds)
+            if gpu
+                .clouds
+                .as_ref()
+                .is_none_or(|(held, ..)| !Arc::ptr_eq(held, &clouds)) =>
+        {
             gpu.clouds = (!clouds.indices.is_empty()).then(|| {
                 let vertices = device.create_buffer_with_data(&BufferInitDescriptor {
                     label: Some("iw4l_minecraft_cloud_vertices"),
@@ -346,7 +357,13 @@ fn prepare_terrain(
         }));
     }
     if gpu.bind.is_none()
-        && let (Some(view), Some((_, atlas)), Some((_, celestial)), Some((_, cracks)), Some(sampler)) = (
+        && let (
+            Some(view),
+            Some((_, atlas)),
+            Some((_, celestial)),
+            Some((_, cracks)),
+            Some(sampler),
+        ) = (
             gpu.view.as_ref(),
             gpu.atlas.as_ref(),
             gpu.celestial.as_ref(),
@@ -420,6 +437,7 @@ fn prepare_terrain(
 
     let mut view = TerrainView {
         environment: frame.environment,
+        thermal: [if frame.thermal_active { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         hand_clip: frame.hand_clip,
         ..TerrainView::default()
     };
@@ -443,7 +461,11 @@ fn prepare_terrain(
     }
 }
 
-fn upload_atlas(device: &RenderDevice, queue: &RenderQueue, atlas: &MinecraftAtlasImage) -> TextureView {
+fn upload_atlas(
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    atlas: &MinecraftAtlasImage,
+) -> TextureView {
     let levels = atlas.levels.len().max(1) as u32;
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("iw4l_minecraft_atlas"),
@@ -460,7 +482,10 @@ fn upload_atlas(device: &RenderDevice, queue: &RenderQueue, atlas: &MinecraftAtl
         view_formats: &[],
     });
     for (level, texels) in atlas.levels.iter().enumerate() {
-        let (w, h) = ((atlas.width >> level).max(1), (atlas.height >> level).max(1));
+        let (w, h) = (
+            (atlas.width >> level).max(1),
+            (atlas.height >> level).max(1),
+        );
         if texels.len() < (w * h * 4) as usize {
             break;
         }
@@ -488,7 +513,12 @@ fn upload_atlas(device: &RenderDevice, queue: &RenderQueue, atlas: &MinecraftAtl
 }
 
 fn draw_terrain(
-    view: ViewQuery<(&ViewTarget, &SceneDepthTexture, &ExtractedView, Option<&Msaa>)>,
+    view: ViewQuery<(
+        &ViewTarget,
+        &SceneDepthTexture,
+        &ExtractedView,
+        Option<&Msaa>,
+    )>,
     registry: Res<ExactPipelineRegistry>,
     device: Res<RenderDevice>,
     mut gpu: ResMut<TerrainGpu>,
@@ -500,7 +530,19 @@ fn draw_terrain(
     let (target, depth, extracted_view, msaa) = view.into_inner();
     let format = target.main_texture_format();
     let samples = msaa.map_or(1, Msaa::samples);
-    let [sky, opaque, translucent, clouds, crack, entity, entity_culled, entity_translucent, shadow, backdrop, hand] = gpu
+    let [
+        sky,
+        opaque,
+        translucent,
+        clouds,
+        crack,
+        entity,
+        entity_culled,
+        entity_translucent,
+        shadow,
+        backdrop,
+        hand,
+    ] = gpu
         .pipelines
         .entry((format, samples))
         .or_insert_with(|| pipelines(&device, &registry, format, samples))
@@ -517,7 +559,14 @@ fn draw_terrain(
         });
     let vp = extracted_view.viewport;
     let (depth_min, depth_max) = reverse_z_viewport_depth(GFX_DEPTH_RANGE_SCENE);
-    pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, depth_min, depth_max);
+    pass.set_viewport(
+        vp.x as f32,
+        vp.y as f32,
+        vp.z as f32,
+        vp.w as f32,
+        depth_min,
+        depth_max,
+    );
     pass.set_bind_group(0, &bind, &[]);
     pass.set_render_pipeline(&opaque);
     for pos in &gpu.visible {
@@ -537,16 +586,35 @@ fn draw_terrain(
         pass.draw_indexed(0..*count, 0, 0..1);
     }
     if let Some(card) = gpu.backdrop.as_ref() {
-        let (band_min, band_max) = reverse_z_viewport_depth(super::depth_range::GFX_DEPTH_RANGE_VIEWMODEL);
-        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, band_min, band_max);
+        let (band_min, band_max) =
+            reverse_z_viewport_depth(super::depth_range::GFX_DEPTH_RANGE_VIEWMODEL);
+        pass.set_viewport(
+            vp.x as f32,
+            vp.y as f32,
+            vp.z as f32,
+            vp.w as f32,
+            band_min,
+            band_max,
+        );
         pass.set_render_pipeline(&backdrop);
         pass.set_vertex_buffer(0, card.slice(..));
         pass.draw(0..6, 0..1);
-        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, depth_min, depth_max);
+        pass.set_viewport(
+            vp.x as f32,
+            vp.y as f32,
+            vp.z as f32,
+            vp.w as f32,
+            depth_min,
+            depth_max,
+        );
         pass.set_render_pipeline(&opaque);
     }
     // Mobs, then their shadows on what is drawn so far.
-    for (pipeline, mesh) in [(&entity, &gpu.entities[0]), (&entity_culled, &gpu.entities[1]), (&shadow, &gpu.entities[3])] {
+    for (pipeline, mesh) in [
+        (&entity, &gpu.entities[0]),
+        (&entity_culled, &gpu.entities[1]),
+        (&shadow, &gpu.entities[3]),
+    ] {
         if let Some((vertices, indices, count)) = mesh.as_ref() {
             pass.set_render_pipeline(pipeline);
             pass.set_vertex_buffer(0, vertices.slice(..));
@@ -559,7 +627,14 @@ fn draw_terrain(
     pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, 0.0, 0.0);
     pass.set_render_pipeline(&sky);
     pass.draw(0..3, 0..1);
-    pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, depth_min, depth_max);
+    pass.set_viewport(
+        vp.x as f32,
+        vp.y as f32,
+        vp.z as f32,
+        vp.w as f32,
+        depth_min,
+        depth_max,
+    );
     pass.set_render_pipeline(&translucent);
     for pos in gpu.visible.iter().rev() {
         let Some(section) = gpu.sections.get(pos) else {
@@ -586,13 +661,28 @@ fn draw_terrain(
     }
     // The hand in front of everything, as the view model is.
     if let Some((vertices, indices, count)) = gpu.hand.as_ref() {
-        let (band_min, band_max) = reverse_z_viewport_depth(super::depth_range::GFX_DEPTH_RANGE_VIEWMODEL);
-        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, band_min, band_max);
+        let (band_min, band_max) =
+            reverse_z_viewport_depth(super::depth_range::GFX_DEPTH_RANGE_VIEWMODEL);
+        pass.set_viewport(
+            vp.x as f32,
+            vp.y as f32,
+            vp.z as f32,
+            vp.w as f32,
+            band_min,
+            band_max,
+        );
         pass.set_render_pipeline(&hand);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..*count, 0, 0..1);
-        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, depth_min, depth_max);
+        pass.set_viewport(
+            vp.x as f32,
+            vp.y as f32,
+            vp.z as f32,
+            vp.w as f32,
+            depth_min,
+            depth_max,
+        );
     }
     if let Some((_, vertices, indices, count)) = gpu.clouds.as_ref() {
         pass.set_render_pipeline(&clouds);
@@ -619,6 +709,7 @@ struct TerrainView {
     hand_clip: mat4x4<f32>,
     view: vec4<f32>,
     origin: vec4<f32>,
+    thermal: vec4<f32>,
     environment: Environment,
 }
 @group(0) @binding(0) var<uniform> view: TerrainView;
@@ -868,6 +959,9 @@ fn entity_fragment(in: EntityOut) -> @location(0) vec4<f32> {
     if texel.a < 0.1 {
         discard;
     }
+    if view.thermal.x > 0.5 {
+        return vec4<f32>(1.0);
+    }
     let keep = abs(in.colour.a);
     let overlay = select(vec3<f32>(1.0), vec3<f32>(1.0, 0.0, 0.0), in.colour.a < 0.0);
     let lit = texel.rgb * in.colour.rgb * keep + overlay * (1.0 - keep) * in.light;
@@ -879,6 +973,9 @@ fn entity_translucent_fragment(in: EntityOut) -> @location(0) vec4<f32> {
     let texel = textureSampleLevel(atlas, atlas_sampler, in.uv, 0.0);
     if texel.a < 0.1 {
         discard;
+    }
+    if view.thermal.x > 0.5 {
+        return vec4<f32>(vec3<f32>(1.0), texel.a * in.colour.a);
     }
     let lit = texel.rgb * in.colour.rgb;
     return vec4<f32>(mix(lit, view.environment.fog.rgb, fog_value(in.world_pos)), texel.a * in.colour.a);
@@ -1092,7 +1189,13 @@ fn pipelines(
             operation: bevy::render::render_resource::BlendOperation::Add,
         },
     };
-    let make = |vertex: &str, fragment: &str, buffers: &[RawVertexBufferLayout], depth_write: bool, compare: CompareFunction, blend: Option<BlendState>, cull: Option<bevy::render::render_resource::Face>| {
+    let make = |vertex: &str,
+                fragment: &str,
+                buffers: &[RawVertexBufferLayout],
+                depth_write: bool,
+                compare: CompareFunction,
+                blend: Option<BlendState>,
+                cull: Option<bevy::render::render_resource::Face>| {
         device.create_render_pipeline(&RawRenderPipelineDescriptor {
             label: Some("iw4l_minecraft_terrain"),
             layout: Some(&pipeline_layout),
@@ -1132,8 +1235,24 @@ fn pipelines(
         })
     };
     [
-        make("sky_vertex", "sky_fragment", &[], false, CompareFunction::Equal, None, None),
-        make("vertex", "opaque", &buffers, true, CompareFunction::GreaterEqual, None, None),
+        make(
+            "sky_vertex",
+            "sky_fragment",
+            &[],
+            false,
+            CompareFunction::Equal,
+            None,
+            None,
+        ),
+        make(
+            "vertex",
+            "opaque",
+            &buffers,
+            true,
+            CompareFunction::GreaterEqual,
+            None,
+            None,
+        ),
         make(
             "vertex",
             "translucent",
@@ -1161,7 +1280,15 @@ fn pipelines(
             Some(crumbling),
             None,
         ),
-        make("entity_vertex", "entity_fragment", &entity_buffers, true, CompareFunction::GreaterEqual, None, None),
+        make(
+            "entity_vertex",
+            "entity_fragment",
+            &entity_buffers,
+            true,
+            CompareFunction::GreaterEqual,
+            None,
+            None,
+        ),
         make(
             "entity_vertex",
             "entity_fragment",
@@ -1189,7 +1316,23 @@ fn pipelines(
             Some(BlendState::ALPHA_BLENDING),
             None,
         ),
-        make("backdrop_vertex", "backdrop_fragment", &backdrop_buffers, true, CompareFunction::GreaterEqual, None, None),
-        make("hand_vertex", "hand_fragment", &buffers, true, CompareFunction::GreaterEqual, None, None),
+        make(
+            "backdrop_vertex",
+            "backdrop_fragment",
+            &backdrop_buffers,
+            true,
+            CompareFunction::GreaterEqual,
+            None,
+            None,
+        ),
+        make(
+            "hand_vertex",
+            "hand_fragment",
+            &buffers,
+            true,
+            CompareFunction::GreaterEqual,
+            None,
+            None,
+        ),
     ]
 }

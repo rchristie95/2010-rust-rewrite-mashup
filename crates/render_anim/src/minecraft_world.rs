@@ -357,10 +357,12 @@ fn update(
         .and_then(|entity| gamepads.get(entity).ok());
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
+        ui.minimap = None;
     }
     ui.loading_world = runtime.loading.is_some();
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
+        ui.minimap = None;
         if assets::minecraft_map::is_minecraft(&match_.zone) {
             let seed = seed();
             diag::info!(World, "Minecraft world: seed {seed}");
@@ -375,6 +377,7 @@ fn update(
             view.active = true;
         }
     }
+    ui.map_active = view.active;
     let Some(mut authority) = authority else {
         return;
     };
@@ -431,6 +434,7 @@ fn update(
             Err(error) => {
                 diag::warn!(World, "Minecraft world failed to load: {error}");
                 view.active = false;
+                ui.map_active = false;
             }
         }
     }
@@ -473,8 +477,12 @@ fn update(
     let remote_view = presented
         .snapshot()
         .and_then(|snapshot| snapshot.meta.for_client(local.0))
-        .and_then(|meta| meta.remote_missile)
-        .is_some_and(|link| link.unlink_at_ms.is_none());
+        .is_some_and(|meta| {
+            meta.linked_weapon_view.is_some()
+                || meta
+                    .remote_missile
+                    .is_some_and(|link| link.unlink_at_ms.is_none())
+        });
 
     let alive = ps.pm_type == 0;
     if !alive {
@@ -780,6 +788,7 @@ fn update(
                     all_events.push(sim::voxel::VoxelEvent::Shot {
                         block: [hit.pos.0, hit.pos.1, hit.pos.2],
                         damage: 160.0 / 30.0,
+                        drop_items: true,
                     });
                     if hand
                         .swing
@@ -909,7 +918,7 @@ fn update(
                         );
                     }
                 }
-                sim::voxel::VoxelEvent::Explosion { center } => {
+                sim::voxel::VoxelEvent::Explosion { center, .. } => {
                     let pitch = (1.0 + (sounds.random() - sounds.random()) * 0.2) * 0.7;
                     sounds.play(
                         &world.packs,
@@ -935,7 +944,7 @@ fn update(
         time.elapsed_secs_f64(),
     );
     if let Some(sounds) = sounds.as_mut() {
-        for (pos, block, blast) in &broken {
+        for (pos, block, blast, _) in &broken {
             if *blast {
                 continue;
             }
@@ -952,8 +961,7 @@ fn update(
         }
     }
     if let Some(entities) = entities.as_mut() {
-        let positions: Vec<_> = broken.iter().map(|(pos, ..)| *pos).collect();
-        entities.broke(&world.scene, &positions);
+        entities.broke(&world.scene, &broken);
         entities.drop_blocks(&broken);
     }
 
@@ -1032,11 +1040,15 @@ fn update(
     if let Some(sounds) = sounds.as_mut() {
         sound_queue.0.append(&mut sounds.queued);
     }
-    // The minimap's picture, and its corners on the map.
+    let selecting = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .is_some_and(|meta| meta.location_selection.is_some());
     ui.minimap = minimap
         .update(
             time.delta_secs_f64(),
             feet,
+            selecting,
             &world.scene,
             &world.packs,
             &world.atlas,
@@ -1047,8 +1059,14 @@ fn update(
                 let p = sim::voxel::to_map(origin, [f64::from(x), feet[1], f64::from(z)]);
                 [p[0], p[1]]
             };
-            (image, corner(bx, bz), corner(bx + 256, bz + 256))
+            let size = crate::minecraft_minimap::SIZE;
+            (image, corner(bx, bz), corner(bx + size, bz + size))
         });
+    sim::voxel::set_minimap(
+        ui.minimap
+            .as_ref()
+            .and_then(|(_, a, b)| hud_iw4::compass_map_bounds_from_minimap_corners(*a, *b, 90.0)),
+    );
     // The Overworld clock and the environment attributes of MinecraftOSS.
     let dt = time.delta_secs_f64();
     let partial = mining.tick(&world.scene, dt);
@@ -1427,6 +1445,7 @@ fn update(
 }
 
 fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
+    runtime.minimap = Default::default();
     runtime.retained_collision.clear();
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {
         sim::voxel::deactivate();

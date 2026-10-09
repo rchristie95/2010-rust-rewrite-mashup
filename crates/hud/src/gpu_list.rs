@@ -155,11 +155,15 @@ fn hash_one_quad(h: &mut impl Hasher, q: &Draw2dQuad) {
     }
 }
 
-fn fingerprint_quads<'a>(n: usize, quads: impl Iterator<Item = &'a Draw2dQuad>) -> u64 {
+fn fingerprint_quads<'a>(
+    n: usize,
+    quads: impl Iterator<Item = (&'a Draw2dQuad, bevy::asset::AssetId<Image>)>,
+) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     n.hash(&mut h);
-    for q in quads {
+    for (q, image) in quads {
         hash_one_quad(&mut h, q);
+        image.hash(&mut h);
     }
     h.finish()
 }
@@ -378,7 +382,7 @@ pub fn present_list(input: PresentInput<'_>) -> usize {
         });
     }
     let shown = prepared.len();
-    let fp = fingerprint_quads(shown, prepared.iter().map(|p| &p.quad));
+    let fp = fingerprint_quads(shown, prepared.iter().map(|p| (&p.quad, p.texture.id())));
     if !latch.hidden
         && fp == latch.last_fp
         && latch.last_shown == shown

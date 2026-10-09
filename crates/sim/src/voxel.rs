@@ -29,6 +29,7 @@ pub struct VoxelChunk {
 /// The block world traces run against, and where it sits in map space.
 #[derive(Default)]
 pub struct VoxelWorld {
+    minimap: Option<hud_iw4::CompassMapBounds>,
     brushes: usize,
     origin: [f64; 3],
     chunks: HashMap<(i32, i32), VoxelChunk>,
@@ -127,16 +128,24 @@ pub struct MobAttackCredit {
 pub enum VoxelEvent {
     /// A bullet struck this block, with the damage it would have done: the
     /// weapon's, at that range, after penetration.
-    Shot { block: [i32; 3], damage: f32 },
+    Shot {
+        block: [i32; 3],
+        damage: f32,
+        drop_items: bool,
+    },
     /// An explosion went off here, in blocks.
-    Explosion { center: [f64; 3] },
+    Explosion {
+        center: [f64; 3],
+        radius: f32,
+        cone: Option<([f32; 3], f32)>,
+    },
     /// A bullet struck the mob with this key, with the damage it would have
     /// done at that range, from this block point.
     MobShot {
         key: u64,
         damage: f32,
         from: [f64; 3],
-        credit: MobAttackCredit,
+        credit: Option<MobAttackCredit>,
     },
     /// A bullet's path through the air, in blocks, up to what stopped it:
     /// blocks without collision on it (grass, flowers) take its damage.
@@ -144,6 +153,7 @@ pub enum VoxelEvent {
         from: [f64; 3],
         to: [f64; 3],
         damage: f32,
+        drop_items: bool,
     },
 }
 
@@ -151,7 +161,7 @@ static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::ne
 
 /// A bullet impact at map point `end` on a surface facing `normal`: the
 /// block behind the surface.
-pub fn push_shot(end: [f32; 3], normal: [f32; 3], damage: f32) {
+pub fn push_shot(end: [f32; 3], normal: [f32; 3], damage: f32, drop_items: bool) {
     let Ok(world) = WORLD.read() else {
         return;
     };
@@ -167,12 +177,19 @@ pub fn push_shot(end: [f32; 3], normal: [f32; 3], damage: f32) {
     ];
     let block = std::array::from_fn(|k| (p[k] - n[k] * 0.05).floor() as i32);
     if let Ok(mut events) = EVENTS.lock() {
-        events.push(VoxelEvent::Shot { block, damage });
+        events.push(VoxelEvent::Shot {
+            block,
+            damage,
+            drop_items,
+        });
     }
 }
 
 /// An explosion at map point `origin`.
-pub fn push_explosion(origin: [f32; 3]) {
+pub fn push_explosion(origin: [f32; 3], radius: f32, cone: Option<([f32; 3], f32)>) {
+    if !radius.is_finite() || radius <= 0.0 || !origin.iter().all(|v| v.is_finite()) {
+        return;
+    }
     let Ok(world) = WORLD.read() else {
         return;
     };
@@ -181,7 +198,13 @@ pub fn push_explosion(origin: [f32; 3]) {
     };
     let center = to_block(world.origin, origin);
     if let Ok(mut events) = EVENTS.lock() {
-        events.push(VoxelEvent::Explosion { center });
+        let radius = radius / BLOCK;
+        let cone = cone.map(|(forward, cosine)| ([forward[0], forward[2], -forward[1]], cosine));
+        events.push(VoxelEvent::Explosion {
+            center,
+            radius,
+            cone,
+        });
     }
 }
 
@@ -239,7 +262,7 @@ pub(crate) fn mob_on_segment(start: [f32; 3], end: [f32; 3]) -> Option<(u64, f32
 }
 
 /// A bullet's path from map point `start` to `end`.
-pub(crate) fn push_ray(start: [f32; 3], end: [f32; 3], damage: f32) {
+pub(crate) fn push_ray(start: [f32; 3], end: [f32; 3], damage: f32, drop_items: bool) {
     let Ok(world) = WORLD.read() else {
         return;
     };
@@ -248,7 +271,12 @@ pub(crate) fn push_ray(start: [f32; 3], end: [f32; 3], damage: f32) {
     };
     let (from, to) = (to_block(world.origin, start), to_block(world.origin, end));
     if let Ok(mut events) = EVENTS.lock() {
-        events.push(VoxelEvent::Ray { from, to, damage });
+        events.push(VoxelEvent::Ray {
+            from,
+            to,
+            damage,
+            drop_items,
+        });
     }
 }
 
@@ -290,7 +318,30 @@ pub fn mob_targets() -> Vec<(u64, [f32; 3], [f32; 3])> {
         .collect()
 }
 
+pub(crate) fn mob_blast_targets(origin: [f32; 3], radius: f32) -> Vec<(u64, [f32; 3], f32)> {
+    if !radius.is_finite() || radius <= 0.0 || origin.iter().any(|value| !value.is_finite()) {
+        return Vec::new();
+    }
+    mob_targets()
+        .into_iter()
+        .filter_map(|(key, min, max)| {
+            let mid = std::array::from_fn(|i| (min[i] + max[i]) * 0.5);
+            let half = std::array::from_fn(|i| (max[i] - min[i]) * 0.5);
+            let distance = gamemode_iw4::radius_damage_distance_to_aabb(origin, mid, half);
+            (distance < radius).then_some((key, mid, distance))
+        })
+        .collect()
+}
 pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3], credit: MobAttackCredit) {
+    push_mob_damage(key, damage, from, Some(credit));
+}
+
+pub(crate) fn push_mob_damage(
+    key: u64,
+    damage: f32,
+    from: [f32; 3],
+    credit: Option<MobAttackCredit>,
+) {
     let Ok(world) = WORLD.read() else {
         return;
     };
@@ -355,6 +406,7 @@ pub fn set_block_shape(x: i32, y: i32, z: i32, shape: u16) {
 pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]>>) {
     if let Ok(mut world) = WORLD.write() {
         *world = Some(VoxelWorld {
+            minimap: None,
             brushes: brushes.as_ptr() as usize,
             origin,
             chunks: HashMap::new(),
@@ -362,6 +414,18 @@ pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]
         });
     }
     bump();
+}
+
+pub fn set_minimap(bounds: Option<hud_iw4::CompassMapBounds>) {
+    if let Ok(mut world) = WORLD.write()
+        && let Some(world) = world.as_mut()
+    {
+        world.minimap = bounds;
+    }
+}
+
+pub fn minimap() -> Option<hud_iw4::CompassMapBounds> {
+    WORLD.read().ok()?.as_ref()?.minimap
 }
 
 pub fn deactivate() {
@@ -649,7 +713,7 @@ impl VoxelWorld {
                             let (t0, t1) =
                                 ((bmin[k] - a[k]) / delta[k], (bmax[k] - a[k]) / delta[k]);
                             let (near, far) = (t0.min(t1), t0.max(t1));
-                            if near > t_in {
+                            if near > t_in || (near == t_in && axis.is_none()) {
                                 t_in = near;
                                 axis = Some(k);
                             }
@@ -674,6 +738,94 @@ impl VoxelWorld {
         }
         out
     }
+}
+
+pub(crate) fn loaded_surface_z_under(
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+) -> Option<Option<f32>> {
+    let guard = WORLD.read().ok()?;
+    loaded_surface_z_under_in(guard.as_ref()?, bounds_min, bounds_max)
+}
+
+fn loaded_surface_z_under_in(
+    world: &VoxelWorld,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+) -> Option<Option<f32>> {
+    if bounds_min
+        .iter()
+        .chain(bounds_max.iter())
+        .any(|v| !v.is_finite())
+        || (0..3).any(|i| bounds_min[i] > bounds_max[i])
+    {
+        return None;
+    }
+
+    let scale = f64::from(BLOCK);
+    let min_x = (world.origin[0] + f64::from(bounds_min[0]) / scale).floor() as i32;
+    let max_x =
+        ((world.origin[0] + f64::from(bounds_max[0]) / scale).ceil() as i32).saturating_sub(1);
+    let min_z = (world.origin[2] - f64::from(bounds_max[1]) / scale).floor() as i32;
+    let max_z =
+        ((world.origin[2] - f64::from(bounds_min[1]) / scale).ceil() as i32).saturating_sub(1);
+    let min_bx = world.origin[0] + f64::from(bounds_min[0]) / scale;
+    let max_bx = world.origin[0] + f64::from(bounds_max[0]) / scale;
+    let min_bz = world.origin[2] - f64::from(bounds_max[1]) / scale;
+    let max_bz = world.origin[2] - f64::from(bounds_min[1]) / scale;
+    if min_x > max_x || min_z > max_z {
+        return None;
+    }
+    let columns = (i64::from(max_x) - i64::from(min_x) + 1)
+        .checked_mul(i64::from(max_z) - i64::from(min_z) + 1)?;
+    if columns > 16_384 {
+        return None;
+    }
+    let max_shape_top = world
+        .shapes
+        .iter()
+        .flatten()
+        .map(|shape| f64::from(shape[4]))
+        .filter(|top| top.is_finite())
+        .fold(0.0f64, f64::max);
+    let mut highest: Option<f64> = None;
+
+    for z in min_z..=max_z {
+        for x in min_x..=max_x {
+            let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
+            let x0 = f64::from(x);
+            let z0 = f64::from(z);
+            if x0 + 1.0 <= min_bx || x0 >= max_bx || z0 + 1.0 <= min_bz || z0 >= max_bz {
+                continue;
+            }
+            let mut column_top: Option<f64> = None;
+            for y in (chunk.min_y..chunk.min_y + chunk.height).rev() {
+                if column_top.is_some_and(|top| f64::from(y) + max_shape_top <= top) {
+                    break;
+                }
+                for shape in world.shape_at(x, y, z) {
+                    let shape_x0 = x0 + f64::from(shape[0]);
+                    let shape_x1 = x0 + f64::from(shape[3]);
+                    let shape_z0 = z0 + f64::from(shape[2]);
+                    let shape_z1 = z0 + f64::from(shape[5]);
+                    if shape_x1 <= min_bx
+                        || shape_x0 >= max_bx
+                        || shape_z1 <= min_bz
+                        || shape_z0 >= max_bz
+                    {
+                        continue;
+                    }
+                    let top = f64::from(y) + f64::from(shape[4]);
+                    column_top = Some(column_top.map_or(top, |old| old.max(top)));
+                }
+            }
+            if let Some(top) = column_top {
+                highest = Some(highest.map_or(top, |old| old.max(top)));
+            }
+        }
+    }
+
+    Some(highest.map(|top| ((top - world.origin[1]) * scale) as f32))
 }
 
 /// A box swept from `start` to `end` in map space against the block world.

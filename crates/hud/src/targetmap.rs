@@ -118,14 +118,8 @@ fn full_map_rect(rect: &asset_game::MenuRect, world_size: [f32; 2]) -> [f32; 4] 
 }
 
 fn world_to_map(compass: &DrawableCompass, map: [f32; 4], world: [f32; 2]) -> [f32; 2] {
-    let b = compass.bounds;
-    let d = [world[0] - b.upper_left[0], world[1] - b.upper_left[1]];
-    let east = b.north[1] * d[0] - b.north[0] * d[1];
-    let south = -b.north[1] * d[1] - b.north[0] * d[0];
-    [
-        map[0] + map[2] * (east / b.world_size[0]),
-        map[1] + map[3] * (south / b.world_size[1]),
-    ]
+    let uv = compass.bounds.world_to_uv(world);
+    [map[0] + map[2] * uv[0], map[1] + map[3] * uv[1]]
 }
 
 fn pic(
@@ -317,6 +311,7 @@ pub(crate) fn update_targetmap(
     presented: Res<PresentedSnapshot>,
     cursor: Res<LocationCursor>,
     compass: Option<Res<assets::SessionCompass>>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
     mut gaps: ResMut<HudPresentationGaps>,
@@ -352,8 +347,12 @@ pub(crate) fn update_targetmap(
         hide(&mut pass);
         return;
     };
-    let Some(drawable) = crate::compass::resolve(compass.as_deref(), &mut hud_images, &mut gaps)
-    else {
+    let Some(drawable) = crate::compass::resolve_world(
+        compass.as_deref(),
+        minecraft.as_deref(),
+        &mut hud_images,
+        &mut gaps,
+    ) else {
         hide(&mut pass);
         return;
     };

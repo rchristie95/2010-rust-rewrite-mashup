@@ -13,9 +13,10 @@ use minecraft_terrain::scene::{HandcraftedScene, Scene};
 use minecraftoss_core::chunk::HeightmapKind;
 
 /// Blocks across the picture.
-const SIZE: i32 = 256;
+pub(crate) const SIZE: i32 = 256;
 /// Seconds between redraws, and the move that forces one.
 const REDRAW_SECONDS: f64 = 2.0;
+const CHANGE_REDRAW_SECONDS: f64 = 0.25;
 const RECENTRE: i32 = 16;
 
 /// Frames a new picture waits before it shows, so its texture has reached
@@ -33,6 +34,7 @@ pub(crate) struct Minimap {
     pending: Option<(usize, [i32; 2], u8)>,
     centre: Option<(i32, i32)>,
     since: f64,
+    revision: Option<u64>,
     colours: HashMap<String, Option<[f32; 3]>>,
 }
 
@@ -43,12 +45,22 @@ impl Minimap {
         &mut self,
         dt: f64,
         feet: [f64; 3],
+        selecting: bool,
         scene: &HandcraftedScene,
         packs: &PackStack,
         atlas: &Atlas,
         images: &mut Assets<Image>,
     ) -> Option<(Handle<Image>, [i32; 2])> {
         self.since += dt;
+        let pinned = self.shown.filter(|_| selecting).map(|(_, corner)| corner);
+        if let Some(corner) = pinned
+            && self
+                .pending
+                .is_some_and(|(_, pending, _)| pending != corner)
+        {
+            self.pending = None;
+            self.centre = Some((corner[0] + SIZE / 2, corner[1] + SIZE / 2));
+        }
         if let Some((index, corner, frames)) = self.pending.as_mut() {
             if *frames == 0 {
                 self.shown = Some((*index, *corner));
@@ -57,15 +69,30 @@ impl Minimap {
                 *frames -= 1;
             }
         }
-        let here = (feet[0].floor() as i32, feet[2].floor() as i32);
-        let moved = self.centre.is_none_or(|(x, z)| (x - here.0).abs() >= RECENTRE || (z - here.1).abs() >= RECENTRE);
-        if self.pending.is_none() && (moved || self.since >= REDRAW_SECONDS) {
+        let here = pinned.map_or_else(
+            || (feet[0].floor() as i32, feet[2].floor() as i32),
+            |corner| (corner[0] + SIZE / 2, corner[1] + SIZE / 2),
+        );
+        let moved = self
+            .centre
+            .is_none_or(|(x, z)| (x - here.0).abs() >= RECENTRE || (z - here.1).abs() >= RECENTRE);
+        let changed =
+            self.revision != Some(scene.revision()) && self.since >= CHANGE_REDRAW_SECONDS;
+        if self.pending.is_none() && (moved || changed || self.since >= REDRAW_SECONDS) {
             self.since = 0.0;
-            let centre = (here.0.div_euclid(RECENTRE) * RECENTRE, here.1.div_euclid(RECENTRE) * RECENTRE);
+            let centre = (
+                here.0.div_euclid(RECENTRE) * RECENTRE,
+                here.1.div_euclid(RECENTRE) * RECENTRE,
+            );
             self.centre = Some(centre);
             let pixels = self.draw(centre, scene, packs, atlas);
+            self.revision = Some(scene.revision());
             let image = Image::new(
-                Extent3d { width: SIZE as u32, height: SIZE as u32, depth_or_array_layers: 1 },
+                Extent3d {
+                    width: SIZE as u32,
+                    height: SIZE as u32,
+                    depth_or_array_layers: 1,
+                },
                 TextureDimension::D2,
                 pixels,
                 TextureFormat::Rgba8UnormSrgb,
@@ -78,18 +105,53 @@ impl Minimap {
                 }
                 None => self.handles[index] = Some(images.add(image)),
             }
-            self.pending = Some((index, [centre.0 - SIZE / 2, centre.1 - SIZE / 2], SWAP_FRAMES));
+            self.pending = Some((
+                index,
+                [centre.0 - SIZE / 2, centre.1 - SIZE / 2],
+                SWAP_FRAMES,
+            ));
         }
         let (index, corner) = self.shown?;
         Some((self.handles[index].clone()?, corner))
     }
 
-    fn draw(&mut self, (cx, cz): (i32, i32), scene: &HandcraftedScene, packs: &PackStack, atlas: &Atlas) -> Vec<u8> {
+    fn draw(
+        &mut self,
+        (cx, cz): (i32, i32),
+        scene: &HandcraftedScene,
+        packs: &PackStack,
+        atlas: &Atlas,
+    ) -> Vec<u8> {
         let (x0, z0) = (cx - SIZE / 2, cz - SIZE / 2);
         let mut heights = vec![i32::MIN; (SIZE * (SIZE + 1)) as usize];
+        let range = scene.vertical_range();
+        let mut placed_tops = HashMap::<(i32, i32), i32>::new();
+        for cz in (z0 - 1).div_euclid(16)..=(z0 + SIZE - 1).div_euclid(16) {
+            for cx in x0.div_euclid(16)..=(x0 + SIZE - 1).div_euclid(16) {
+                if let Some(placed) = scene.chunk_edits((cx, cz)).0 {
+                    for &(x, y, z) in placed.keys() {
+                        placed_tops
+                            .entry((x, z))
+                            .and_modify(|top| *top = (*top).max(y))
+                            .or_insert(y);
+                    }
+                }
+            }
+        }
         let height_at = |x: i32, z: i32| -> Option<i32> {
             let chunk = scene.generated_chunk((x >> 4, z >> 4))?;
-            Some(chunk.heightmaps.get(HeightmapKind::WorldSurface, (x & 15) as usize, (z & 15) as usize) - 1)
+            let generated = chunk.heightmaps.get(
+                HeightmapKind::WorldSurface,
+                (x & 15) as usize,
+                (z & 15) as usize,
+            ) - 1;
+            let top = placed_tops
+                .get(&(x, z))
+                .copied()
+                .map_or(generated, |y| generated.max(y));
+            (range.start..=top)
+                .rev()
+                .find(|&y| Scene::block(scene, (x, y, z)).is_some())
         };
         // One row north of the picture too, for the first row's shading.
         for row in 0..=SIZE {
@@ -99,7 +161,7 @@ impl Minimap {
                 }
             }
         }
-        let mut out = vec![0u8; (SIZE * SIZE * 4) as usize];
+        let mut out = [24u8, 28, 32, 255].repeat((SIZE * SIZE) as usize);
         for row in 0..SIZE {
             for col in 0..SIZE {
                 let h = heights[((row + 1) * SIZE + col) as usize];
@@ -107,17 +169,11 @@ impl Minimap {
                     continue;
                 }
                 let (x, z) = (x0 + col, z0 + row);
-                // The surface block, stepping down past air left by edits.
-                let mut y = h;
-                let block = loop {
-                    match Scene::block(scene, (x, y, z)) {
-                        Some(block) => break Some(block),
-                        None if y > h - 8 => y -= 1,
-                        None => break None,
-                    }
+                let y = h;
+                let Some(block) = Scene::block(scene, (x, y, z)) else {
+                    continue;
                 };
-                let Some(block) = block else { continue };
-                let Some(colour) = self.colour(block, packs, atlas) else { continue };
+                let colour = self.colour(block, packs, atlas).unwrap_or([0.5, 0.5, 0.5]);
                 let north = heights[(row * SIZE + col) as usize];
                 let shade = if north == i32::MIN || y == north {
                     220.0 / 255.0
@@ -138,12 +194,21 @@ impl Minimap {
 
     /// A block's colour on the map: its tint for grass, foliage and water,
     /// else the average of its particle texture.
-    fn colour(&mut self, block: &minecraft_terrain::scene::Block, packs: &PackStack, atlas: &Atlas) -> Option<[f32; 3]> {
+    fn colour(
+        &mut self,
+        block: &minecraft_terrain::scene::Block,
+        packs: &PackStack,
+        atlas: &Atlas,
+    ) -> Option<[f32; 3]> {
         let path = block.id.path.as_str();
         let tinted = match path {
-            "grass_block" | "short_grass" | "tall_grass" | "fern" | "large_fern" => Some([0.49, 0.72, 0.33]),
+            "grass_block" | "short_grass" | "tall_grass" | "fern" | "large_fern" => {
+                Some([0.49, 0.72, 0.33])
+            }
             p if p.ends_with("_leaves") => Some([0.30, 0.55, 0.20]),
-            "water" | "bubble_column" | "kelp" | "kelp_plant" | "seagrass" | "tall_seagrass" => Some([0.25, 0.42, 0.85]),
+            "water" | "bubble_column" | "kelp" | "kelp_plant" | "seagrass" | "tall_seagrass" => {
+                Some([0.25, 0.42, 0.85])
+            }
             "lava" => Some([0.85, 0.35, 0.05]),
             _ => None,
         };
@@ -161,7 +226,12 @@ impl Minimap {
             .and_then(|texture| {
                 let [u0, v0, u1, v1] = atlas.region(&texture);
                 let (w, h) = (atlas.pixels.width() as f32, atlas.pixels.height() as f32);
-                let (px0, py0, px1, py1) = ((u0 * w) as u32, (v0 * h) as u32, (u1 * w) as u32, (v1 * h) as u32);
+                let (px0, py0, px1, py1) = (
+                    (u0 * w) as u32,
+                    (v0 * h) as u32,
+                    (u1 * w) as u32,
+                    (v1 * h) as u32,
+                );
                 let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
                 for y in py0..py1.min(atlas.pixels.height()) {
                     for x in px0..px1.min(atlas.pixels.width()) {

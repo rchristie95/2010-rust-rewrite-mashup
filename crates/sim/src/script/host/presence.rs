@@ -101,7 +101,7 @@ pub(crate) fn spawn_presence(world: &mut World, origin: [f32; 3]) -> Result<Scri
 }
 
 /// The observability boundary for script writes: native collision reads go
-/// through here, so a query sees every pose, solidity and visibility change a
+/// through here, so a query sees every model, pose, solidity and visibility change a
 /// native or field store made earlier in the same tick.
 pub(crate) fn settled(world: &mut World) -> FrameWorld<'_> {
     settle_collision(world);
@@ -117,19 +117,27 @@ pub(crate) fn settle_collision(world: &mut World) {
         .iter()
         .filter_map(|(id, e)| Some((*id, e.presence?, e.hidden, e.solid)))
         .collect();
-    let wanted: BTreeMap<ScriptModelId, ([f32; 3], [f32; 3], bool, bool)> = placed
+    let wanted: Vec<_> = placed
         .into_iter()
         .map(|(object, presence, hidden, solid)| {
             let origin = vector(&mut runtime, object, "origin");
             let angles = vector(&mut runtime, object, "angles");
-            (presence, (origin, angles, hidden, solid))
+            let model = model_field(&mut runtime, object);
+            let attachments = runtime.entities[&object].attachments.clone();
+            (presence, origin, angles, model, attachments, hidden, solid)
         })
         .collect();
     let mut frame = FrameWorld::from_world(world);
-    for row in frame.entity_collision_capabilities_mut() {
-        let Some(&(origin, angles, hidden, solid)) =
-            row.owner.script_model().and_then(|id| wanted.get(&id))
-        else {
+    for (presence, origin, angles, model, attachments, hidden, solid) in wanted {
+        settle_model(
+            &mut frame,
+            presence,
+            model.as_deref(),
+            &attachments,
+            origin,
+            angles,
+        );
+        let Some(row) = frame.collision_owner_mut(presence) else {
             continue;
         };
         row.hidden = hidden;
@@ -393,45 +401,63 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
     wanted
 }
 
-fn present_model(frame: &mut FrameWorld, want: &Wanted) {
-    let capability = want
-        .model
-        .as_deref()
+fn settle_model(
+    frame: &mut FrameWorld,
+    presence: ScriptModelId,
+    model: Option<&str>,
+    attachments: &[(Arc<str>, Arc<str>)],
+    origin: [f32; 3],
+    angles: [f32; 3],
+) {
+    let capability = model
         .and_then(|model| frame.model_capability(model))
         .flatten();
-    let anim = want
-        .anim_op
-        .as_ref()
-        .and_then(|op| op.as_deref().and_then(|clip| frame.script_model_anim(clip)));
-    let Some(row) = frame.collision_owner_mut(want.presence) else {
+    let Some(row) = frame.collision_owner_mut(presence) else {
         return;
     };
-    match (&want.model, row.dobj.as_mut()) {
+    match (model, row.dobj.as_mut()) {
         (None, _) => row.dobj = None,
         (Some(model), Some(dobj)) => {
-            if dobj.current_model != **model {
+            if dobj.current_model != model {
                 dobj.replace_model(model, capability);
             }
         }
         (Some(model), None) => {
             row.dobj = Some(AuthorityDObjState::at_pose(
-                model,
-                capability,
-                want.origin,
-                want.angles,
+                model, capability, origin, angles,
             ));
-            row.followed_pose = Some((want.origin, want.angles));
+            row.followed_pose = Some((origin, angles));
         }
     }
     let Some(dobj) = row.dobj.as_mut() else {
         return;
     };
-    let attachments: Vec<(&str, &str)> = want
-        .attachments
+    let attachments: Vec<(&str, &str)> = attachments
         .iter()
         .map(|(model, tag)| (&**model, &**tag))
         .collect();
     dobj.set_attachments(&attachments);
+}
+
+fn present_model(frame: &mut FrameWorld, want: &Wanted) {
+    settle_model(
+        frame,
+        want.presence,
+        want.model.as_deref(),
+        &want.attachments,
+        want.origin,
+        want.angles,
+    );
+    let anim = want
+        .anim_op
+        .as_ref()
+        .and_then(|op| op.as_deref().and_then(|clip| frame.script_model_anim(clip)));
+    let Some(dobj) = frame
+        .collision_owner_mut(want.presence)
+        .and_then(|row| row.dobj.as_mut())
+    else {
+        return;
+    };
     for (tag, hidden) in &want.part_ops {
         dobj.set_tag_hidden(tag, *hidden);
     }
