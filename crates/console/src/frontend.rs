@@ -21,6 +21,7 @@ pub(crate) struct FrontendState {
     browser_notice: Option<(String, std::time::Instant)>,
     password_advert: Option<net::MasterAdvert>,
     password_joining: bool,
+    joining: bool,
     lobby_password: String,
     rules_seeded: bool,
 }
@@ -41,7 +42,7 @@ impl LobbyServices<'_> {
             .as_ref()
             .is_some_and(|intent| intent.configured())
         {
-            return Err("Public lobbies require a configured master".into());
+            return Err("Choose a community server in Options to play online".into());
         }
         let pending = self.action.as_mut().ok_or("Lobby service is unavailable")?;
         if pending.0.is_some() {
@@ -58,6 +59,7 @@ pub(crate) fn register(registry: &mut ConsoleRegistry) {
         "seta",
         "setfromdvar",
         "ui_create_lobby",
+        "ui_create_online_lobby",
         "ui_leave_lobby",
         "ui_start_match",
         "ui_lobby_privacy",
@@ -127,6 +129,9 @@ pub(crate) fn route(
         commands.remove_resource::<sim::HostGameModeSelection>();
         *party = UiPartyState::default();
         state.public = false;
+        state.joining = false;
+        state.password_joining = false;
+        state.password_advert = None;
     } else if returned_in_menu && state.public {
         let reason = match services.bridge.as_ref().map(|bridge| bridge.state()) {
             Some(net::MasterBridgeState::Failed { error, .. }) => format!("{error:?}"),
@@ -182,14 +187,32 @@ pub(crate) fn route(
                         dvars.set(name, value);
                     }
                 }
-                "ui_create_lobby" => {
-                    selected_game(&dvars, &maps)?;
+                "ui_create_lobby" | "ui_create_online_lobby" => {
+                    let online = command.name == "ui_create_online_lobby";
+                    if online && maps.contains("minecraft:overworld") {
+                        dvars.set("ui_mapname", "minecraft:overworld");
+                    }
+                    let (map, mode) = selected_game(&dvars, &maps)?;
+                    if online {
+                        services.submit(net::MasterMenuAction::Host {
+                            map,
+                            mode: mode.token().into(),
+                            password: String::new(),
+                        })?;
+                    }
                     state.lobby_password.clear();
                     party.active = true;
                     party.in_lobby = true;
                     party.is_host = true;
-                    state.public = false;
-                    dvars.set("ui_frontend_status", "");
+                    state.public = online;
+                    dvars.set(
+                        "ui_frontend_status",
+                        if online {
+                            "Creating online lobby..."
+                        } else {
+                            ""
+                        },
+                    );
                     menus.write(UiMenuRequest::Open("game_lobby".into()));
                 }
                 "ui_leave_lobby" => {
@@ -198,6 +221,9 @@ pub(crate) fn route(
                     }
                     *party = UiPartyState::default();
                     state.public = false;
+                    state.joining = false;
+                    state.password_joining = false;
+                    state.password_advert = None;
                     menus.write(UiMenuRequest::Close("game_lobby".into()));
                 }
                 "ui_lobby_privacy" => {
@@ -226,6 +252,13 @@ pub(crate) fn route(
                 "ui_start_match" => {
                     if !party.in_lobby || !party.is_host {
                         return Err("Only the lobby host can start a match".into());
+                    }
+                    if state.public
+                        && !services.bridge.as_ref().is_some_and(|bridge| {
+                            matches!(bridge.state(), net::MasterBridgeState::Hosting { .. })
+                        })
+                    {
+                        return Err("Wait for the online lobby to connect".into());
                     }
                     let (map, mode) = selected_game(&dvars, &maps)?;
                     commands.insert_resource(host_rules(&dvars));
@@ -390,18 +423,19 @@ pub(crate) fn route(
                     change_page(&mut state.browser_page, command, len);
                 }
                 "ui_join_lobby" | "ui_join_lobby_id" | "ui_join_lobby_selected" => {
-                    let (advert_id, map, mode) = if command.name == "ui_join_lobby_id" {
-                        let advert_id = command
+                    if state.joining || state.password_joining {
+                        return Err("A join request is already pending".into());
+                    }
+                    let id = if command.name == "ui_join_lobby_id" {
+                        command
                             .args
                             .first()
                             .filter(|id| id.is_ascii())
                             .ok_or("usage: ui_join_lobby_id <hex ID>")?
                             .parse()
-                            .map_err(|_| "Invalid lobby ID")?;
-                        let (map, mode) = selected_game(&dvars, &maps)?;
-                        (advert_id, map, mode.token().into())
+                            .map_err(|_| "Invalid lobby ID")?
                     } else {
-                        let id = if command.name == "ui_join_lobby_selected" {
+                        if command.name == "ui_join_lobby_selected" {
                             dvars
                                 .get("ui_browser_join_id")
                                 .unwrap_or_default()
@@ -418,54 +452,72 @@ pub(crate) fn route(
                                 .get(row)
                                 .ok_or("Lobby is no longer available")?
                                 .id
-                        };
-                        let advert = services
-                            .browser
-                            .as_ref()
-                            .and_then(|browser| {
-                                browser
-                                    .snapshot()
-                                    .adverts
-                                    .into_iter()
-                                    .find(|advert| advert.id == id)
-                            })
-                            .ok_or("Lobby is no longer available")?;
-                        if advert.locked
-                            || advert.players >= advert.max_players
-                            || !advert.missing.is_empty()
-                        {
-                            return Err(if advert.locked {
-                                "Lobby closed".into()
-                            } else if advert.players >= advert.max_players {
-                                "Lobby is full".into()
-                            } else {
-                                format!(
-                                    "Requires {}",
-                                    net::content_names(advert.missing).to_uppercase()
-                                )
-                            });
                         }
-                        if advert.password_protected {
-                            state.password_advert = Some(advert.clone());
-                            dvars.set("ui_password_input", "");
-                            dvars.set("ui_password_status", "");
-                            menus.write(UiMenuRequest::Open("lobby_password_join".into()));
-                            return Ok(());
-                        }
-                        (advert.id, advert.map.clone(), advert.mode.clone())
                     };
+                    if command.name == "ui_join_lobby_id"
+                        && !services.browser.as_ref().is_some_and(|browser| {
+                            browser
+                                .snapshot()
+                                .adverts
+                                .iter()
+                                .any(|advert| advert.id == id)
+                        })
+                    {
+                        let (map, mode) = selected_game(&dvars, &maps)?;
+                        services.submit(net::MasterMenuAction::Join {
+                            password: String::new(),
+                            advert_id: id,
+                            map,
+                            mode: mode.token().into(),
+                        })?;
+                        state.joining = true;
+                        dvars.set("ui_browser_status", "Joining lobby...");
+                        return Ok(());
+                    }
+                    let advert = services
+                        .browser
+                        .as_ref()
+                        .and_then(|browser| {
+                            browser
+                                .snapshot()
+                                .adverts
+                                .into_iter()
+                                .find(|advert| advert.id == id)
+                        })
+                        .ok_or("Lobby is no longer available; refresh the browser")?;
+                    if advert.locked
+                        || advert.players >= advert.max_players
+                        || !advert.missing.is_empty()
+                        || !maps.contains(&advert.map)
+                    {
+                        return Err(if advert.locked {
+                            "Lobby closed".into()
+                        } else if advert.players >= advert.max_players {
+                            "Lobby is full".into()
+                        } else if !advert.missing.is_empty() {
+                            format!(
+                                "Requires {}",
+                                net::content_names(advert.missing).to_uppercase()
+                            )
+                        } else {
+                            format!("Map {} is not installed", advert.map)
+                        });
+                    }
+                    if advert.password_protected {
+                        state.password_advert = Some(advert);
+                        dvars.set("ui_password_input", "");
+                        dvars.set("ui_password_status", "");
+                        menus.write(UiMenuRequest::Open("lobby_password_join".into()));
+                        return Ok(());
+                    }
                     services.submit(net::MasterMenuAction::Join {
                         password: String::new(),
-                        advert_id,
-                        map,
-                        mode,
+                        advert_id: advert.id,
+                        map: advert.map,
+                        mode: advert.mode,
                     })?;
-                    state.public = true;
-                    party.active = true;
-                    party.in_lobby = true;
-                    party.is_host = false;
-                    dvars.set("ui_frontend_status", "Joining lobby...");
-                    menus.write(UiMenuRequest::Open("game_lobby".into()));
+                    state.joining = true;
+                    dvars.set("ui_browser_status", "Joining lobby...");
                 }
                 _ => {}
             }
@@ -488,6 +540,38 @@ pub(crate) fn route(
             echo.write(format!("menu: {error}"));
         }
     }
+    if state.joining
+        && let Some(bridge) = services.bridge.as_ref()
+    {
+        match bridge.state() {
+            net::MasterBridgeState::Joined { .. } => {
+                state.joining = false;
+                state.public = true;
+                party.active = true;
+                party.in_lobby = true;
+                party.is_host = false;
+                dvars.set("ui_browser_status", "");
+                dvars.set("ui_frontend_status", "");
+                menus.write(UiMenuRequest::Close("find_lobbies".into()));
+                menus.write(UiMenuRequest::Open("game_lobby".into()));
+            }
+            net::MasterBridgeState::Failed { error, .. } => {
+                let message = format!("Could not join lobby: {error:?}");
+                state.browser_notice = Some((message.clone(), std::time::Instant::now()));
+                dvars.set("ui_browser_status", message);
+                state.joining = false;
+                let _ = services.submit(net::MasterMenuAction::LeaveLobby);
+            }
+            net::MasterBridgeState::Closed { reason, .. } => {
+                let message = format!("Lobby closed: {reason:?}");
+                state.browser_notice = Some((message.clone(), std::time::Instant::now()));
+                dvars.set("ui_browser_status", message);
+                state.joining = false;
+                let _ = services.submit(net::MasterMenuAction::LeaveLobby);
+            }
+            _ => {}
+        }
+    }
     if services.bridge.is_none() && !state.password_joining {
         dvars.set("ui_password_pending", "0");
     }
@@ -503,7 +587,9 @@ pub(crate) fn route(
                 party.active = true;
                 party.in_lobby = true;
                 party.is_host = false;
+                dvars.set("ui_frontend_status", "");
                 menus.write(UiMenuRequest::Close("lobby_password_join".into()));
+                menus.write(UiMenuRequest::Close("find_lobbies".into()));
                 menus.write(UiMenuRequest::Open("game_lobby".into()));
             }
             net::MasterBridgeState::Failed { error, .. } => {
@@ -561,7 +647,10 @@ pub(crate) fn route(
                             .unwrap_or_else(|| "Player".into())
                     })
                     .collect();
-                if dvars.get("ui_frontend_status") == Some("Joining lobby...") {
+                if matches!(
+                    dvars.get("ui_frontend_status"),
+                    Some("Joining lobby..." | "Creating online lobby...")
+                ) {
                     dvars.set("ui_frontend_status", "");
                 }
                 dvars.set("ui_mapname", map);
@@ -572,7 +661,16 @@ pub(crate) fn route(
                 );
             }
             net::MasterBridgeState::Failed { error, .. } => {
-                dvars.set("ui_frontend_status", format!("{error:?}"))
+                dvars.set(
+                    "ui_frontend_status",
+                    format!("Could not create online lobby: {error:?}"),
+                );
+                if party.is_host {
+                    state.public = false;
+                    *party = UiPartyState::default();
+                    menus.write(UiMenuRequest::Close("game_lobby".into()));
+                    let _ = services.submit(net::MasterMenuAction::LeaveLobby);
+                }
             }
             net::MasterBridgeState::Closed { reason, .. } => {
                 dvars.set("ui_frontend_status", format!("Lobby closed: {reason:?}"))
