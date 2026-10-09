@@ -141,6 +141,9 @@ pub(crate) fn route(
         returned_in_menu |= !fact.had_world;
     }
     if returned_from_world {
+        if state.public {
+            let _ = services.submit(net::MasterMenuAction::LeaveLobby);
+        }
         commands.remove_resource::<frame::HostMatchRules>();
         commands.remove_resource::<sim::HostGameModeSelection>();
         *party = UiPartyState::default();
@@ -148,6 +151,7 @@ pub(crate) fn route(
         state.joining = false;
         state.password_joining = false;
         state.password_advert = None;
+        menus.write(UiMenuRequest::Close("game_lobby".into()));
     } else if returned_in_menu && state.public {
         let reason = match services.bridge.as_ref().map(|bridge| bridge.state()) {
             Some(net::MasterBridgeState::Failed { error, .. }) => format!("{error:?}"),
@@ -156,11 +160,13 @@ pub(crate) fn route(
             }
             _ => "Public lobby ended".into(),
         };
+        let _ = services.submit(net::MasterMenuAction::LeaveLobby);
         state.public = false;
-        if !party.is_host {
-            *party = UiPartyState::default();
-            menus.write(UiMenuRequest::Close("game_lobby".into()));
-        }
+        state.joining = false;
+        state.password_joining = false;
+        state.password_advert = None;
+        *party = UiPartyState::default();
+        menus.write(UiMenuRequest::Close("game_lobby".into()));
         dvars.set("ui_frontend_status", reason);
     }
     if dvars.get("ui_mapname").is_none()
