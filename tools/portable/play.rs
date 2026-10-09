@@ -16,7 +16,7 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-const COMMANDS: &str = "set ui_minecraft_all_killstreaks 1; spawn 0; bot add 6; force_match_start";
+const COMMANDS: &str = "set ui_minecraft_all_killstreaks 1; spawn; bot add 6; force_match_start";
 
 fn run() -> Result<(), String> {
     let exe = env::current_exe().map_err(|e| e.to_string())?;
@@ -43,9 +43,13 @@ fn run() -> Result<(), String> {
         fs::write(root.join("launcher-check.txt"), format!("PASS: native launcher; no helper, driver or installer.\nMap: minecraft:overworld\nCommands: {COMMANDS}\n")).map_err(|e| e.to_string())?;
         return Ok(());
     }
-    Command::new(root.join("iw4l.exe"))
-        .args(["map", "minecraft:overworld", "--cmds", COMMANDS])
-        .current_dir(root)
+    let mut game = Command::new(root.join("iw4l.exe"));
+    if env::args().any(|arg| arg == "--menu") {
+        game.arg("menu");
+    } else {
+        game.args(["map", "minecraft:overworld", "--cmds", COMMANDS]);
+    }
+    game.current_dir(root)
         .env("IW4L_GAMES", root.join("games/mw2"))
         .env("IW4L_SKATE_ASSETS", root.join("skate-data/assets"))
         .env(

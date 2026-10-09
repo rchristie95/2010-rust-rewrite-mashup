@@ -25,8 +25,8 @@ create a shortcut to the one you want. If MW2 is still missing, the launcher sho
 the folders it tried and how to add the shortcut: right-click inside the launcher
 folder, New > Shortcut, paste the game folder path.
 
-Launch `iw4l.exe`. Before starting the game or contacting QUIC, it checks its
-community's HTTPS manifest. An unchanged executable starts normally. An update
+Launch `iw4l.exe`. By default, before starting the game or contacting QUIC, it checks
+its community's HTTPS manifest. An unchanged executable starts normally. An update
 is downloaded, decompressed with a size limit and verified against SHA-256.
 A temporary copy of the same executable waits for the original process, replaces
 it and restarts with the original arguments. Failed installation or spawning
@@ -35,7 +35,7 @@ restores the previous executable. There is no permanent second executable.
 The temporary files are `iw4l.update.exe`, `iw4l.previous.exe` and a helper in
 `%TEMP%`; the next verified startup removes the backup and helper. The lock file
 `iw4l.update.lock` serializes update checks; `iw4l.update-helper` records cleanup.
-An update error stops startup and reports the failure; a configured community requires a reachable update origin.
+With automatic updates enabled, an update error stops startup and reports the failure.
 Without a community descriptor, local development can launch without checking.
 For a custom portable build, a trusted descriptor can set `auto_update = false`
 under `[updates]` and omit `url`. The launcher then keeps its executable while
