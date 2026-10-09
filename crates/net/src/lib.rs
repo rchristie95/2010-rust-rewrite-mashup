@@ -1,4 +1,6 @@
 mod local_account;
+pub mod minecraft;
+pub use minecraft::{MinecraftMessage, MinecraftMobVisual, MinecraftSync};
 pub use local_account::{AccountSaveReceipt, LocalAccount};
 mod account_identity;
 pub use account_identity::{AccountChallenge, AccountIdentityError, AccountKey, AccountProof};

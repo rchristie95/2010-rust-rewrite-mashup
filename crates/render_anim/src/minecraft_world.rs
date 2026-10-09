@@ -2,7 +2,7 @@
 //! world around the local player, whose chunks become block collision and
 //! whose section meshes go to the renderer. The world sits with its player
 //! spawn at map origin, a block to `sim::voxel::BLOCK` map units.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 
 use bevy::input::gamepad::GamepadButton;
@@ -107,6 +107,16 @@ struct StepState {
 struct Runtime {
     loading: Option<mpsc::Receiver<Result<Loaded, String>>>,
     world: Option<Loaded>,
+    network_origin: Option<[f64; 3]>,
+    network_seed: Option<i64>,
+    network_edits_expected: Option<u32>,
+    network_edits: BTreeMap<(i32, i32, i32), u32>,
+    changed_blocks: HashSet<(i32, i32, i32)>,
+    edit_revision: u64,
+    network_log: Vec<(u64, Vec<([i32; 3], u32)>)>,
+    live_progress: HashMap<sim::ClientId, (usize, usize)>,
+    sent_init: HashSet<sim::ClientId>,
+    init_progress: HashMap<sim::ClientId, PeerInit>,
     day: DayCycle,
     environment_accumulator: f64,
     environment_primed: bool,
@@ -326,6 +336,52 @@ fn seed() -> i64 {
     (nanos as i64) ^ 0x5DEE_CE66_D1CE_4E5B
 }
 
+struct PeerInit {
+    edits: Vec<([i32; 3], u32)>,
+    next: usize,
+    revision: u64,
+    began: bool,
+    log_index: usize,
+}
+
+fn block_shape(
+    blocks: &minecraftoss_core::block::BlockRegistry,
+    state: BlockStateId,
+    shapes: &mut HashMap<BlockStateId, u16>,
+    shape_ids: &mut HashMap<Vec<[u32; 6]>, u16>,
+) -> u16 {
+    if state == BlockStateId::AIR {
+        return 0;
+    }
+    *shapes.entry(state).or_insert_with(|| {
+        let boxes = blocks.collision_boxes(state);
+        if boxes.is_empty() {
+            return 0;
+        }
+        let key: Vec<[u32; 6]> = boxes
+            .iter()
+            .map(|b| b.map(|v| (v as f32).to_bits()))
+            .collect();
+        if let Some(&id) = shape_ids.get(&key) {
+            return id;
+        }
+        let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
+        let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
+        shape_ids.insert(key, id);
+        id
+    })
+}
+
+fn start_load(seed: i64) -> mpsc::Receiver<Result<Loaded, String>> {
+    let (send, receive) = mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("minecraft-world-load".into())
+        .spawn(move || {
+            let _ = send.send(load(seed));
+        });
+    receive
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update(
     time: Res<Time>,
@@ -334,6 +390,11 @@ fn update(
     local: Res<net::LocalPresentClient>,
     presented: Res<net::PresentedSnapshot>,
     authority: Option<ResMut<net::AuthorityWorld>>,
+    prediction: Option<Res<net::ClientPredictionState>>,
+    role: Res<frame::RuntimeRole>,
+    mut minecraft_sync: ResMut<net::MinecraftSync>,
+    hub: Option<Res<net::UdpAuthorityHub>>,
+    mut reliable: ResMut<net::ReliableEventHub>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     (mut ui, mut puppet, mut images, mut sound_queue, buttons): (
         ResMut<frame::MinecraftUi>,
@@ -364,23 +425,47 @@ fn update(
         stop(&mut runtime, &mut view);
         ui.minimap = None;
         if assets::minecraft_map::is_minecraft(&match_.zone) {
-            let seed = seed();
-            diag::info!(World, "Minecraft world: seed {seed}");
-            let (send, receive) = mpsc::channel();
-            let _ = std::thread::Builder::new()
-                .name("minecraft-world-load".into())
-                .spawn(move || {
-                    let _ = send.send(load(seed));
-                });
-            runtime.loading = Some(receive);
+            if *role != frame::RuntimeRole::Client {
+                let seed = seed();
+                runtime.network_seed = Some(seed);
+                diag::info!(World, "Minecraft world: seed {seed}");
+                runtime.loading = Some(start_load(seed));
+            }
             ui.loading_world = true;
             view.active = true;
         }
     }
+    for message in std::mem::take(&mut minecraft_sync.incoming) {
+        match message {
+            net::MinecraftMessage::Begin { seed, origin, edits, .. }
+                if *role == frame::RuntimeRole::Client && view.active =>
+            {
+                runtime.network_seed = Some(seed);
+                runtime.network_origin = Some(origin);
+                runtime.network_edits_expected = Some(edits);
+                runtime.network_edits.clear();
+            }
+            net::MinecraftMessage::Blocks { changes, .. }
+                if *role == frame::RuntimeRole::Client && view.active =>
+            {
+                for (pos, block) in changes {
+                    runtime.network_edits.insert((pos[0], pos[1], pos[2]), block);
+                    runtime.changed_blocks.insert((pos[0], pos[1], pos[2]));
+                }
+            }
+            _ => {}
+        }
+    }
+    if *role == frame::RuntimeRole::Client
+        && runtime.world.is_none()
+        && runtime.loading.is_none()
+        && runtime.network_edits_expected.is_some_and(|count| runtime.network_edits.len() >= count as usize)
+        && let Some(seed) = runtime.network_seed
+    {
+        runtime.loading = Some(start_load(seed));
+    }
     ui.map_active = view.active;
-    let Some(mut authority) = authority else {
-        return;
-    };
+    let mut authority = authority;
 
     if let Some(receive) = &runtime.loading
         && let Ok(result) = receive.try_recv()
@@ -389,7 +474,7 @@ fn update(
         match result {
             Ok(world) => {
                 let (x, y, z) = world.stream.player_spawn;
-                view.origin = [x, y, z];
+                view.origin = runtime.network_origin.unwrap_or([x, y, z]);
                 view.atlas = Some(world.atlas.clone());
                 view.celestial = Some(world.celestial.clone());
                 view.crack_texture = Some(world.crack_texture.clone());
@@ -414,11 +499,19 @@ fn update(
                 runtime.light_volume_at = None;
                 runtime.cloud_center = None;
                 view.generation += 1;
-                sim::voxel::activate(
-                    authority.0.content().clip_brushes(),
-                    view.origin,
-                    vec![Vec::new()],
-                );
+                if let Some(authority) = authority.as_ref() {
+                    sim::voxel::activate(
+                        authority.0.content().clip_brushes(),
+                        view.origin,
+                        vec![Vec::new()],
+                    );
+                } else if let Some(prediction) = prediction.as_ref() {
+                    sim::voxel::activate(
+                        prediction.0.world().content().clip_brushes(),
+                        view.origin,
+                        vec![Vec::new()],
+                    );
+                }
                 diag::info!(
                     World,
                     "Minecraft world ready: seed {} spawn {:?}",
@@ -442,6 +535,13 @@ fn update(
     let origin = view.origin;
     let Runtime {
         world,
+        network_edits,
+        changed_blocks,
+        edit_revision,
+        network_log,
+        live_progress,
+        sent_init,
+        init_progress,
         shapes,
         shape_ids,
         was_alive,
@@ -468,6 +568,18 @@ fn update(
         puppet.active = false;
         return;
     };
+    if *role == frame::RuntimeRole::Client && !changed_blocks.is_empty() {
+        let positions: Vec<_> = changed_blocks.drain().collect();
+        for pos in &positions {
+            let state = network_edits[pos];
+            let state = BlockStateId(state as u16);
+            world.scene.set(*pos, world.stream.states.block(state).cloned());
+            let shape = block_shape(&world.registries.blocks, state, shapes, shape_ids);
+            sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
+        }
+        world.stream.record_edits(&world.scene, &positions);
+        world.stream.mark_edited(&world.scene, &positions);
+    }
     let Some(ps) = presented.player(local.0) else {
         ui.active = false;
         puppet.active = false;
@@ -622,7 +734,7 @@ fn update(
     if alive
         && !*was_alive
         && let Some(at) = spawn_at
-        && authority.0.teleport(local.0, at)
+        && authority.as_mut().is_some_and(|authority| authority.0.teleport(local.0, at))
     {
         diag::info!(
             World,
@@ -766,7 +878,7 @@ fn update(
             || pad_trigger(pad, GamepadButton::RightTrigger2, true)
         {
             hand.swing = Some(0.0);
-            if let Some(meta) = authority.0.client_meta(local.0) {
+            if let Some(meta) = authority.as_ref().and_then(|authority| authority.0.client_meta(local.0)) {
                 entities.punch(
                     eye_block,
                     look,
@@ -778,9 +890,9 @@ fn update(
                 );
             }
         }
-        if buttons.pressed(MouseButton::Left)
+        if authority.is_some() && (buttons.pressed(MouseButton::Left)
             || pad_trigger(pad, GamepadButton::RightTrigger2, false)
-        {
+        ) {
             for _ in 0..hand_ticks {
                 if let Some(hit) = player.target(&world.scene, 4.5) {
                     // A hand mines as vanilla's `getDestroyProgress`: a
@@ -805,7 +917,7 @@ fn update(
             || ((buttons.pressed(MouseButton::Right)
                 || pad_trigger(pad, GamepadButton::LeftTrigger2, false))
                 && hand.place_delay == 0);
-        if place {
+        if place && authority.is_some() {
             hand.place_delay = 4;
             if let Some(pos) = player.place_selected(
                 &mut world.scene,
@@ -854,6 +966,7 @@ fn update(
                     sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
                     world.stream.record_edits(&world.scene, &[pos]);
                     world.stream.mark_edited(&world.scene, &[pos]);
+                    changed_blocks.insert(pos);
                     entities.placed(&world.scene, pos);
                     hand.swing = Some(0.0);
                     if let (Some(sounds), Some(kind)) =
@@ -943,6 +1056,9 @@ fn update(
         },
         time.elapsed_secs_f64(),
     );
+    if authority.is_some() {
+        changed_blocks.extend(broken.iter().map(|(pos, ..)| *pos));
+    }
     if let Some(sounds) = sounds.as_mut() {
         for (pos, block, blast, _) in &broken {
             if *blast {
@@ -1074,7 +1190,7 @@ fn update(
 
     // The mobs: a server tick when due, the blocks it changed, its hits on
     // the player, the mobs' boxes for bullets and their meshes.
-    if let Some(entities) = entities.as_mut() {
+    if let Some(entities) = entities.as_mut().filter(|_| authority.is_some()) {
         let player = crate::minecraft_entities::PlayerView {
             feet,
             alive,
@@ -1086,13 +1202,16 @@ fn update(
         let ticks_before = entities.client_ticks();
         let (changes, hits) = entities.tick(dt, day.ticks as i64, bright_outside, &player);
         for (credit, kills) in entities.take_feedback() {
-            authority.0.confirm_mob_hit(credit, kills);
+            if let Some(authority) = authority.as_mut() {
+                authority.0.confirm_mob_hit(credit, kills);
+            }
         }
         let mob_ticks = (entities.client_ticks() - ticks_before) as u32;
         if !changes.is_empty() {
             let blocks = &world.registries.blocks;
             let mut positions = Vec::with_capacity(changes.len());
             for (pos, block) in changes {
+                changed_blocks.insert(pos);
                 let state = block.as_ref().and_then(|b| world.stream.states.state_of(b));
                 let shape = state.map_or(0, |state| {
                     *shapes.entry(state).or_insert_with(|| {
@@ -1134,9 +1253,8 @@ fn update(
             .filter(|&&w| w > 0)
             .map(|&w| w as u32)
             .filter(|&w| {
-                authority
-                    .0
-                    .weapon_combat_row(w)
+                authority.as_ref()
+                    .and_then(|authority| authority.0.weapon_combat_row(w))
                     .is_some_and(|facts| facts.inventory_type == 0)
             })
             .collect();
@@ -1442,9 +1560,93 @@ fn update(
         }
         view.light_volume = Some(Arc::new((corner, data)));
     }
+    if authority.is_some() {
+        let changes: Vec<_> = changed_blocks
+            .drain()
+            .map(|pos| {
+                let state = minecraft_terrain::scene::Scene::block(&world.scene, pos)
+                    .and_then(|block| world.stream.states.state_of(block))
+                    .unwrap_or(BlockStateId::AIR);
+                network_edits.insert(pos, u32::from(state.0));
+                ([pos.0, pos.1, pos.2], u32::from(state.0))
+            })
+            .collect();
+        if !changes.is_empty() {
+            *edit_revision += 1;
+            network_log.push((*edit_revision, changes));
+        }
+        if let Some(hub) = hub.as_ref() {
+            let clients = hub.committed_clients();
+            sent_init.retain(|client| clients.contains(client));
+            init_progress.retain(|client, _| clients.contains(client));
+            live_progress.retain(|client, _| clients.contains(client));
+            for client in clients {
+                let queue = reliable.queue_mut(client);
+                if !sent_init.contains(&client) {
+                    let init = init_progress.entry(client).or_insert_with(|| PeerInit {
+                        edits: network_edits
+                            .iter()
+                            .map(|(&(x, y, z), &state)| ([x, y, z], state))
+                            .collect(),
+                        next: 0,
+                        revision: *edit_revision,
+                        began: false,
+                        log_index: network_log.len(),
+                    });
+                    if !init.began && queue.pending_len() < 48 {
+                        queue.push(net::ReliableRow::Minecraft(net::MinecraftMessage::Begin {
+                            seed: world.seed,
+                            origin,
+                            revision: init.revision,
+                            edits: init.edits.len() as u32,
+                        }));
+                        init.began = true;
+                    }
+                    while init.began && init.next < init.edits.len() && queue.pending_len() < 48 {
+                        let end = (init.next + 32).min(init.edits.len());
+                        queue.push(net::ReliableRow::Minecraft(net::MinecraftMessage::Blocks {
+                            revision: init.revision,
+                            changes: init.edits[init.next..end].to_vec(),
+                        }));
+                        init.next = end;
+                    }
+                    if init.began && init.next == init.edits.len() {
+                        live_progress.insert(client, (init.log_index, 0));
+                        sent_init.insert(client);
+                        init_progress.remove(&client);
+                    }
+                }
+                if let Some((index, offset)) = live_progress.get_mut(&client) {
+                    while *index < network_log.len() && queue.pending_len() < 48 {
+                        let (revision, edits) = &network_log[*index];
+                        let end = (*offset + 32).min(edits.len());
+                        queue.push(net::ReliableRow::Minecraft(net::MinecraftMessage::Blocks {
+                            revision: *revision,
+                            changes: edits[*offset..end].to_vec(),
+                        }));
+                        *offset = end;
+                        if *offset == edits.len() {
+                            *index += 1;
+                            *offset = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
+    runtime.network_origin = None;
+    runtime.network_seed = None;
+    runtime.network_edits_expected = None;
+    runtime.network_edits.clear();
+    runtime.changed_blocks.clear();
+    runtime.edit_revision = 0;
+    runtime.network_log.clear();
+    runtime.live_progress.clear();
+    runtime.sent_init.clear();
+    runtime.init_progress.clear();
     runtime.minimap = Default::default();
     runtime.retained_collision.clear();
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {

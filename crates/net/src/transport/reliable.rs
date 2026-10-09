@@ -43,6 +43,7 @@ impl ActionVerdict {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReliableRow {
+    Minecraft(crate::MinecraftMessage),
     Failure(String),
     Sound(crate::SvcSound),
     ScriptAudio(sim::ScriptAudioCommand),
@@ -173,6 +174,10 @@ pub fn encode_reliable_payload(
     for (seq, row) in rows {
         out.put_u16(*seq);
         match row {
+            ReliableRow::Minecraft(message) => {
+                out.put_u8(11);
+                crate::minecraft::encode(out, message);
+            }
             ReliableRow::FireCommands(results) => {
                 out.put_u8(10);
                 super::fire_result::encode_fire_results(out, results);
@@ -236,6 +241,7 @@ pub fn decode_reliable_payload(input: &mut WireReader<'_>) -> Result<ReliablePay
     for _ in 0..count {
         let seq = input.get_u16()?;
         let row = match input.get_u8()? {
+            11 => ReliableRow::Minecraft(crate::minecraft::decode(input)?),
             10 => ReliableRow::FireCommands(super::fire_result::decode_fire_results(input)?),
             ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
             ROW_TAG_OUTCOME => {

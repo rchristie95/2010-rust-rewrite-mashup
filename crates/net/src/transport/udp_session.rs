@@ -260,26 +260,61 @@ impl PeerReplicationState {
         if payload.rows.is_empty() && payload.dropped_oldest == self.control_drops_sent {
             return Ok(());
         }
-        let last = payload
-            .rows
-            .last()
-            .map(|(seq, _)| *seq)
-            .or(self.last_control_seq);
         let dropped = payload.dropped_oldest;
-        let packet = ServerPacket::Control {
-            header: PacketHeader {
-                connection,
-                sequence: 0,
-                ack: 0,
-                epoch,
-            },
-            payload,
-        };
-        mailbox
-            .push_control_outbound(member, packet.to_bytes())
-            .map_err(relay_send_error)?;
-        self.last_control_seq = last;
-        self.control_drops_sent = dropped;
+        let rows = payload.rows;
+        let mut index = 0;
+        let mut sent = 0;
+        while index < rows.len() || (index == 0 && dropped != self.control_drops_sent) {
+            if sent == 8 {
+                break;
+            }
+            let mut batch = Vec::new();
+            while index < rows.len() {
+                let candidate = rows[index].clone();
+                batch.push(candidate);
+                let packet = ServerPacket::Control {
+                    header: PacketHeader {
+                        connection,
+                        sequence: 0,
+                        ack: 0,
+                        epoch,
+                    },
+                    payload: crate::ReliablePayload {
+                        ack_through: payload.ack_through,
+                        rows: batch.clone(),
+                        dropped_oldest: dropped,
+                    },
+                };
+                if packet.to_bytes().len() > master_protocol::MAX_OPAQUE_PAYLOAD {
+                    batch.pop();
+                    if batch.is_empty() {
+                        return Err(relay_send_error("reliable control row exceeds relay limit"));
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            let last = batch.last().map(|(seq, _)| *seq);
+            let packet = ServerPacket::Control {
+                header: PacketHeader {
+                    connection,
+                    sequence: 0,
+                    ack: 0,
+                    epoch,
+                },
+                payload: crate::ReliablePayload {
+                    ack_through: payload.ack_through,
+                    rows: batch,
+                    dropped_oldest: dropped,
+                },
+            };
+            mailbox
+                .push_control_outbound(member, packet.to_bytes())
+                .map_err(relay_send_error)?;
+            self.last_control_seq = last.or(self.last_control_seq);
+            self.control_drops_sent = dropped;
+            sent += 1;
+        }
         Ok(())
     }
 
@@ -402,6 +437,14 @@ impl UdpAuthorityHub {
             .iter()
             .find_map(|(conn, id)| (*id == member_id).then_some(*conn))?;
         self.connections.client_of(conn).map(ClientId)
+    }
+
+    pub fn committed_clients(&self) -> Vec<ClientId> {
+        self.replication
+            .iter()
+            .filter(|(_, peer)| matches!(peer.admission, PeerAdmission::Committed { .. }))
+            .filter_map(|(connection, _)| self.connections.client_of(*connection).map(ClientId))
+            .collect()
     }
 
     pub fn deny_member(&mut self, member_id: master_protocol::MemberId) -> Option<ClientId> {

@@ -44,6 +44,7 @@ impl Plugin for NetPlugin {
             .is_some_and(crate::MasterLaunchIntent::enabled);
         app.init_resource::<crate::AccountSaveReceipt>();
         app.insert_resource(self.role)
+            .init_resource::<crate::MinecraftSync>()
             .init_resource::<PresentedSnapshot>()
             .init_resource::<LocalPresentClient>()
             .init_resource::<crate::MasterMatchStart>()

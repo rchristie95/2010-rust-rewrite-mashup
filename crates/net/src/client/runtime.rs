@@ -631,6 +631,7 @@ pub struct FireCommandVerdicts {
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct ReliableInbound<'w> {
+    minecraft: ResMut<'w, crate::MinecraftSync>,
     actions: ResMut<'w, ClientActionInbox>,
     ack: ResMut<'w, ClientReliableAck>,
     events: MessageWriter<'w, ReliableControlEvent>,
@@ -681,6 +682,9 @@ impl ReliableInbound<'_> {
                 continue;
             }
             match row {
+                crate::ReliableRow::Minecraft(message) => {
+                    self.minecraft.incoming.push(message.clone());
+                }
                 crate::ReliableRow::FireCommands(results) => {
                     if results.iter().any(|result| result.client != local) {
                         self.fail("FireResultRecipientMismatch: connection retired");
