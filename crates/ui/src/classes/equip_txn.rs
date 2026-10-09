@@ -234,11 +234,25 @@ fn consume_class_select_handoff(
     if !handoff.pending {
         return;
     }
-    if catalog.resolver.0.is_none() {
+    let mut regenerated = false;
+    if catalog.resolver.0.is_none() || store.slots.is_empty() {
         let Some(weapons) = weapons else {
             return;
         };
         *catalog = crate::ClassLoadoutCatalog::from_weapon_registry(weapons.registry().clone());
+        if store.slots.is_empty() {
+            let replacement = SessionClassStore::from_showcase(0, weapons.registry());
+            if replacement.slots.is_empty() {
+                store.slots = frame::HostClassLoadouts::default()
+                    .slots
+                    .iter()
+                    .map(crate::ClassSlotState::from_host_slot)
+                    .collect();
+            } else {
+                *store = replacement;
+                regenerated = true;
+            }
+        }
     }
     catalog.revision = catalog.revision.wrapping_add(1);
     catalog.primary = std::mem::take(&mut handoff.primary);
@@ -246,7 +260,11 @@ fn consume_class_select_handoff(
     catalog.lethal = std::mem::take(&mut handoff.lethal);
     catalog.tactical = std::mem::take(&mut handoff.tactical);
     catalog.excluded = std::mem::take(&mut handoff.excluded);
-    store.apply_coverage_locks(std::mem::take(&mut handoff.lock_reasons));
+    if regenerated {
+        handoff.lock_reasons.clear();
+    } else {
+        store.apply_coverage_locks(std::mem::take(&mut handoff.lock_reasons));
+    }
     handoff.pending = false;
 }
 
