@@ -1138,6 +1138,7 @@ fn apply_action(
             velocity,
         } => {
             if !origin.into_iter().chain(velocity).all(f32::is_finite)
+                || velocity.into_iter().map(|value| value * value).sum::<f32>() > 4000.0 * 4000.0
                 || !world
                     .client_meta(id)
                     .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
