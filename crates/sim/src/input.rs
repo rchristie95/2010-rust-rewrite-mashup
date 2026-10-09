@@ -65,6 +65,13 @@ pub enum ClientAction {
         angles: [f32; 3],
     },
 
+    SkateMotion {
+        request_id: ActionRequestId,
+        active: bool,
+        origin: [f32; 3],
+        velocity: [f32; 3],
+    },
+
     BeginScriptMoverRotateVelocity {
         request_id: ActionRequestId,
         speed: f32,
@@ -219,6 +226,7 @@ pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
         | ClientAction::SpawnIntermission { request_id }
         | ClientAction::SetMatchPhase { request_id, .. }
         | ClientAction::Move { request_id, .. }
+        | ClientAction::SkateMotion { request_id, .. }
         | ClientAction::BeginScriptMoverRotateVelocity { request_id, .. }
         | ClientAction::ToggleGod { request_id }
         | ClientAction::DebugDamage { request_id, .. }

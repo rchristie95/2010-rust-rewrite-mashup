@@ -377,6 +377,10 @@ impl MasterLaunchIntent {
         matches!(self.0, MasterLaunchMode::Join(_))
     }
 
+    pub const fn is_browser(&self) -> bool {
+        matches!(self.0, MasterLaunchMode::Browser(_))
+    }
+
     pub const fn enabled(&self) -> bool {
         !matches!(self.0, MasterLaunchMode::Disabled)
     }

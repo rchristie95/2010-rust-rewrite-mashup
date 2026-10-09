@@ -1131,6 +1131,44 @@ fn apply_action(
         } => {
             return apply_debug_move(world, id, origin, angles);
         }
+        ClientAction::SkateMotion {
+            request_id: _,
+            active,
+            origin,
+            velocity,
+        } => {
+            if !origin.into_iter().chain(velocity).all(f32::is_finite)
+                || !world
+                    .client_meta(id)
+                    .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
+            {
+                return ActionOutcome::Refused;
+            }
+            if active {
+                let Some(previous) = world.player(id).map(|player| player.origin) else {
+                    return ActionOutcome::Refused;
+                };
+                let displacement = origin
+                    .into_iter()
+                    .zip(previous)
+                    .map(|(next, old)| (next - old) * (next - old))
+                    .sum::<f32>();
+                if displacement > 512.0 * 512.0 {
+                    return ActionOutcome::Refused;
+                }
+                world.external_motion.insert(id);
+                world.set_origin(id, origin);
+                if let Some(player) = world.player_mut(id) {
+                    player.velocity = velocity;
+                }
+            } else {
+                world.external_motion.remove(&id);
+                if let Some(player) = world.player_mut(id) {
+                    player.velocity = velocity;
+                }
+            }
+            ActionOutcome::Applied
+        }
         ClientAction::BeginScriptMoverRotateVelocity {
             request_id: _,
             speed,

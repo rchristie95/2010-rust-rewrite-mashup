@@ -33,6 +33,8 @@ struct Host {
     input_suspended: bool,
     logged_tick: u64,
     last_pose_published: Option<Instant>,
+    last_motion_sent: Option<Instant>,
+    motion_active: bool,
 }
 
 pub fn register(app: &mut App) {
@@ -301,22 +303,24 @@ fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result
 fn stop(
     host: &mut Host,
     mode: &mut SkateMode,
-    authority: &mut net::AuthorityWorld,
+    authority: Option<&mut net::AuthorityWorld>,
     preserve_velocity: bool,
 ) {
     let client = sim::ClientId(mode.client);
-    if preserve_velocity {
-        let fresh = host
-            .last_pose_published
-            .is_some_and(|at| at.elapsed() <= Duration::from_millis(250));
-        let velocity = if fresh && mode.velocity.is_finite() {
-            mode.velocity
-        } else {
-            Vec3::ZERO
-        };
-        authority.0.set_velocity(client, velocity.to_array());
+    if let Some(authority) = authority {
+        if preserve_velocity {
+            let fresh = host
+                .last_pose_published
+                .is_some_and(|at| at.elapsed() <= Duration::from_millis(250));
+            let velocity = if fresh && mode.velocity.is_finite() {
+                mode.velocity
+            } else {
+                Vec3::ZERO
+            };
+            authority.0.set_velocity(client, velocity.to_array());
+        }
+        authority.0.set_external_motion(client, false);
     }
-    authority.0.set_external_motion(client, false);
     host.last_pose_published = None;
     host.enter_requested = false;
     host.activating = false;
@@ -333,7 +337,7 @@ fn stop(
     diag::info!(World, "Skate mode stopped; map session retained");
 }
 
-fn present(mode: &mut SkateMode, p: Pose, authority: &mut net::AuthorityWorld) {
+fn present(mode: &mut SkateMode, p: Pose, authority: Option<&mut net::AuthorityWorld>) {
     let b = collision::basis();
     let mut root = b * p.root * b.inverse();
     root.w_axis = collision::from_skate(p.root.w_axis.truncate()).extend(1.);
@@ -357,10 +361,43 @@ fn present(mode: &mut SkateMode, p: Pose, authority: &mut net::AuthorityWorld) {
             fov,
         )
     });
-    authority.0.set_origin(
-        sim::ClientId(mode.client),
-        root.w_axis.truncate().to_array(),
-    );
+    if let Some(authority) = authority {
+        authority.0.set_origin(
+            sim::ClientId(mode.client),
+            root.w_axis.truncate().to_array(),
+        );
+    }
+}
+
+fn publish_client_motion(
+    host: &mut Host,
+    mode: &SkateMode,
+    local: sim::ClientId,
+    inbox: Option<&mut net::ClientActionInbox>,
+    ids: Option<&mut net::ActionRequestIds>,
+) {
+    let changed = host.motion_active != mode.active;
+    if !changed
+        && (!mode.active
+            || host
+                .last_motion_sent
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(100)))
+    {
+        return;
+    }
+    let (Some(inbox), Some(ids)) = (inbox, ids) else {
+        return;
+    };
+    let action = sim::ClientAction::SkateMotion {
+        request_id: ids.allocate(),
+        active: mode.active,
+        origin: mode.root.w_axis.truncate().to_array(),
+        velocity: mode.velocity.to_array(),
+    };
+    if inbox.push(local, action).is_ok() {
+        host.last_motion_sent = Some(Instant::now());
+        host.motion_active = mode.active;
+    }
 }
 
 fn update(
@@ -371,6 +408,9 @@ fn update(
     presented: Res<net::PresentedSnapshot>,
     clip: Res<crate::DynEntPhysClip>,
     mut authority: Option<ResMut<net::AuthorityWorld>>,
+    mut actions: Option<ResMut<net::ClientActionInbox>>,
+    mut request_ids: Option<ResMut<net::ActionRequestIds>>,
+    role: Res<frame::RuntimeRole>,
     mut mode: ResMut<SkateMode>,
     mut host: ResMut<Host>,
     (gamepads, active): (
@@ -378,9 +418,6 @@ fn update(
         Option<Res<frame::ActivePad>>,
     ),
 ) {
-    let Some(authority) = authority.as_deref_mut() else {
-        return;
-    };
     let aspect_ratio = windows
         .single()
         .map(|w| w.width() / w.height().max(1.))
@@ -392,7 +429,7 @@ fn update(
         .as_ref()
         .is_none_or(|a| clip.0.as_ref().is_some_and(|b| Arc::ptr_eq(a, b)));
     if (mode.active || host.enter_requested || host.activating) && (!alive || !same_map) {
-        stop(&mut host, &mut mode, authority, false);
+        stop(&mut host, &mut mode, authority.as_deref_mut(), false);
     }
     if !same_map {
         host.send = None;
@@ -465,9 +502,11 @@ fn update(
                 mode.entering = false;
                 mode.active = true;
                 host.input_suspended = false;
-                authority.0.set_external_motion(local.0, true);
+                if let Some(authority) = authority.as_deref_mut() {
+                    authority.0.set_external_motion(local.0, true);
+                }
                 host.last_pose_published = Some(published_at);
-                present(&mut mode, p, authority);
+                present(&mut mode, p, authority.as_deref_mut());
                 diag::info!(World, "Skate activation from retained session: {ms}ms");
             }
             Reply::Pose(epoch, p, published_at) if epoch == host.epoch && mode.active => {
@@ -482,10 +521,10 @@ fn update(
                     host.logged_tick = p.tick;
                 }
                 host.last_pose_published = Some(published_at);
-                present(&mut mode, p, authority);
+                present(&mut mode, p, authority.as_deref_mut());
             }
             Reply::Error(e) => {
-                stop(&mut host, &mut mode, authority, false);
+                stop(&mut host, &mut mode, authority.as_deref_mut(), false);
                 host.send = None;
                 host.receive = None;
                 host.ready = false;
@@ -505,7 +544,12 @@ fn update(
     if std::mem::take(&mut mode.toggle_requested) && alive {
         if mode.active || host.enter_requested || host.activating {
             let preserve_velocity = mode.active;
-            stop(&mut host, &mut mode, authority, preserve_velocity);
+            stop(
+                &mut host,
+                &mut mode,
+                authority.as_deref_mut(),
+                preserve_velocity,
+            );
             return;
         }
         if host.send.is_none() {
@@ -515,6 +559,15 @@ fn update(
         host.enter_requested = true;
         mode.entering = true;
         mode.client = local.0.0;
+    }
+    if *role == frame::RuntimeRole::Client {
+        publish_client_motion(
+            &mut host,
+            &mode,
+            local.0,
+            actions.as_deref_mut(),
+            request_ids.as_deref_mut(),
+        );
     }
     if host.enter_requested
         && host.ready
@@ -555,7 +608,7 @@ fn update(
             ))
             .is_err()
         {
-            stop(&mut host, &mut mode, authority, false);
+            stop(&mut host, &mut mode, authority.as_deref_mut(), false);
         }
     }
 }

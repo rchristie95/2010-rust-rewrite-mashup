@@ -458,6 +458,19 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
             out.put_f32(angles[1]);
             out.put_f32(angles[2]);
         }
+        ClientAction::SkateMotion {
+            request_id,
+            active,
+            origin,
+            velocity,
+        } => {
+            out.put_u8(23);
+            out.put_u32(request_id);
+            out.put_u8(u8::from(active));
+            for value in origin.into_iter().chain(velocity) {
+                out.put_f32(value);
+            }
+        }
         ClientAction::BeginScriptMoverRotateVelocity { request_id, speed } => {
             out.put_u8(9);
             out.put_u32(request_id);
@@ -611,6 +624,12 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
             request_id: input.get_u32()?,
             origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
             angles: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+        }),
+        23 => Ok(ClientAction::SkateMotion {
+            request_id: input.get_u32()?,
+            active: input.get_u8()? != 0,
+            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            velocity: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
         }),
         9 => Ok(ClientAction::BeginScriptMoverRotateVelocity {
             request_id: input.get_u32()?,
