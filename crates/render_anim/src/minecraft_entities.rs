@@ -25,6 +25,7 @@ use minecraftoss_player::items::{ItemEntity, WorldItems};
 use minecraftoss_player::loot::LootBook;
 use minecraftoss_player::rng::XoroshiroRandom;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 const TICK_SECONDS: f64 = 1.0 / 20.0;
 /// Minecraft health per MW2 health.
@@ -35,7 +36,8 @@ const PLAYER: u64 = 0;
 const EYE_HEIGHT: f32 = 1.62;
 
 pub(crate) struct Entities {
-    server: ServerHandle,
+    server: Option<ServerHandle>,
+    remote_mobs: HashMap<u64, RemoteMob>,
     /// The mobs the player tracks, as of the last server tick.
     world: EntityWorld,
     /// The client's copies of them: tracked, interpolated, animated.
@@ -71,6 +73,21 @@ pub(crate) struct Entities {
     feedback: Vec<(sim::voxel::MobAttackCredit, u32)>,
 }
 
+struct RemoteMob {
+    visual: net::MinecraftMobVisual,
+    from: [f32; 3],
+    received: Instant,
+}
+
+impl RemoteMob {
+    fn position(&self) -> [f32; 3] {
+        let blend = (self.received.elapsed().as_secs_f32() * 5.0).min(1.0);
+        std::array::from_fn(|axis| {
+            self.from[axis] + (self.visual.position[axis] - self.from[axis]) * blend
+        })
+    }
+}
+
 const LOOT_TOOL: &str = "minecraft:diamond_pickaxe";
 
 /// The mobs drawn this frame: entity models (cut out, back-face culled,
@@ -87,6 +104,7 @@ pub(crate) struct MobMeshes {
 
 /// The player as the mobs see it this frame.
 pub(crate) struct PlayerView {
+    pub id: u64,
     pub feet: [f64; 3],
     pub alive: bool,
     /// MW2 health, 0..100.
@@ -125,8 +143,22 @@ impl Entities {
         } else {
             diag::warn!(World, "Minecraft data JAR not found: no loot or recipes");
         }
+        Self::with_server(Some(server), seed, inventory, loot)
+    }
+
+    pub(crate) fn new_remote(seed: i64) -> Self {
+        Self::with_server(None, seed, Inventory::default(), None)
+    }
+
+    fn with_server(
+        server: Option<ServerHandle>,
+        seed: i64,
+        inventory: Inventory,
+        loot: Option<LootBook>,
+    ) -> Self {
         Self {
             server,
+            remote_mobs: HashMap::new(),
             world: EntityWorld::default(),
             client: ClientMobs::default(),
             poof: PoofParticles::default(),
@@ -154,11 +186,126 @@ impl Entities {
     }
 
     pub(crate) fn load_chunk(&mut self, chunk: &std::sync::Arc<minecraftoss_core::Chunk>) {
-        self.server.load_chunk(chunk);
+        if let Some(server) = &mut self.server {
+            server.load_chunk(chunk);
+        }
+    }
+
+    pub(crate) fn network_snapshot(&self) -> Vec<net::MinecraftMobVisual> {
+        let w = &self.world;
+        let mut kinds = HashMap::new();
+        for e in w.cows() {
+            kinds.insert(e.id, 0);
+        }
+        for e in w.sheep() {
+            kinds.insert(e.id, 1);
+        }
+        for e in w.pigs() {
+            kinds.insert(e.id, 2);
+        }
+        for e in w.chickens() {
+            kinds.insert(e.id, 3);
+        }
+        for e in w.bats() {
+            kinds.insert(e.id, 4);
+        }
+        for e in w.zombies() {
+            kinds.insert(e.id, 5);
+        }
+        for e in w.skeletons() {
+            kinds.insert(e.id, 6);
+        }
+        for e in w.spiders() {
+            kinds.insert(e.id, 7);
+        }
+        for e in w.creepers() {
+            kinds.insert(e.id, 8);
+        }
+        for e in w.villagers() {
+            kinds.insert(e.id, 9);
+        }
+        for e in w.endermen() {
+            kinds.insert(e.id, 10);
+        }
+        for e in w.iron_golems() {
+            kinds.insert(e.id, 11);
+        }
+        for e in w.slimes() {
+            kinds.insert(e.id, 12);
+        }
+        for e in w.witches() {
+            kinds.insert(e.id, 13);
+        }
+        for e in w.wolves() {
+            kinds.insert(e.id, 14);
+        }
+        let mut mobs: Vec<_> = server_mobs(w)
+            .into_iter()
+            .filter_map(|mob| {
+                let kind = *kinds.get(&mob.id)?;
+                let position = mob.position.to_array().map(|v| v as f32);
+                if !position.into_iter().all(f32::is_finite)
+                    || ![mob.y_rot, mob.x_rot, mob.y_head_rot]
+                        .into_iter()
+                        .all(f32::is_finite)
+                {
+                    return None;
+                }
+                Some(net::MinecraftMobVisual {
+                    id: mob.id,
+                    kind,
+                    position,
+                    yaw: mob.y_rot,
+                    pitch: mob.x_rot,
+                    head_yaw: mob.y_head_rot,
+                    flags: u8::from(mob.baby)
+                        | (u8::from(mob.on_ground) << 1)
+                        | (u8::from(mob.resting) << 2)
+                        | (u8::from(mob.dead) << 3),
+                })
+            })
+            .collect();
+        mobs.sort_by_key(|mob| mob.id);
+        mobs.truncate(128);
+        mobs
+    }
+
+    pub(crate) fn apply_network_snapshot(&mut self, snapshot: &[net::MinecraftMobVisual]) {
+        if self.server.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        let mut seen = HashSet::new();
+        for visual in snapshot.iter().take(128) {
+            if visual.kind > 14
+                || !visual.position.into_iter().all(f32::is_finite)
+                || ![visual.yaw, visual.pitch, visual.head_yaw]
+                    .into_iter()
+                    .all(f32::is_finite)
+            {
+                continue;
+            }
+            seen.insert(visual.id);
+            self.remote_mobs
+                .entry(visual.id)
+                .and_modify(|mob| {
+                    mob.from = mob.position();
+                    mob.visual = visual.clone();
+                    mob.received = now;
+                })
+                .or_insert_with(|| RemoteMob {
+                    visual: visual.clone(),
+                    from: visual.position,
+                    received: now,
+                });
+        }
+        self.remote_mobs.retain(|id, _| seen.contains(id));
     }
 
     pub(crate) fn unload_chunk(&mut self, pos: minecraftoss_core::ChunkPos) {
-        self.server.unload_chunk(pos);
+        if let Some(server) = &mut self.server {
+            server.unload_chunk(pos);
+        }
     }
 
     pub(crate) fn drop_blocks(&mut self, broken: &[((i32, i32, i32), Block, bool, bool)]) {
@@ -196,6 +343,7 @@ impl Entities {
     /// go to the server, stacks the server offered go into the inventory,
     /// and the server's items are mirrored for drawing.
     fn server_items_tick(&mut self, feet: DVec3) {
+        let server = self.server.as_mut().expect("host Minecraft entities");
         let entities = std::mem::take(&mut self.world_items.entities);
         let to_hand: Vec<ItemEntity> = entities
             .iter()
@@ -207,7 +355,7 @@ impl Entities {
             .collect();
         for entity in &to_hand {
             let components = entity.stack.components.as_ref().map(|c| c.to_string());
-            self.server.spawn_item(
+            server.spawn_item(
                 &entity.stack.id,
                 i32::from(entity.stack.count),
                 components.as_deref(),
@@ -217,7 +365,7 @@ impl Entities {
                 entity.age as i32,
             );
             self.server_handed
-                .insert(entity.entity_id, (self.server.sent(), entity.clone()));
+                .insert(entity.entity_id, (server.sent(), entity.clone()));
         }
         let previous: HashMap<u32, ItemEntity> =
             entities.into_iter().map(|e| (e.entity_id, e)).collect();
@@ -242,7 +390,7 @@ impl Entities {
                 None => count,
                 Some(rest) => {
                     let rest_count = i32::from(rest.count);
-                    self.server.spawn_item(
+                    server.spawn_item(
                         &item,
                         rest_count,
                         components.as_deref(),
@@ -348,6 +496,9 @@ impl Entities {
         yaw: f32,
         credit: sim::voxel::MobAttackCredit,
     ) -> bool {
+        let Some(server) = &mut self.server else {
+            return false;
+        };
         let Some((hit, _)) = self.world.mob_on_ray(eye, look, 3.0) else {
             return false;
         };
@@ -363,7 +514,7 @@ impl Entities {
         };
         self.next_attack = self.next_attack.wrapping_add(1);
         self.attacks.insert(self.next_attack, credit);
-        self.server.credited_mob_attack(
+        server.credited_mob_attack(
             self.next_attack,
             hit,
             attack,
@@ -375,7 +526,9 @@ impl Entities {
 
     /// A block the player placed, for the level the mobs walk in.
     pub(crate) fn placed(&mut self, scene: &HandcraftedScene, pos: (i32, i32, i32)) {
-        self.server.player_edit(scene, pos, PlayerEdit::Place);
+        if let Some(server) = &mut self.server {
+            server.player_edit(scene, pos, PlayerEdit::Place);
+        }
     }
 
     /// Client ticks run so far.
@@ -389,10 +542,13 @@ impl Entities {
         scene: &HandcraftedScene,
         broken: &[((i32, i32, i32), Block, bool, bool)],
     ) {
+        let Some(server) = &mut self.server else {
+            return;
+        };
         let mut without_drops = Vec::new();
         for (pos, _, _, drop_items) in broken {
             if *drop_items {
-                self.server.player_edit(scene, *pos, PlayerEdit::Break);
+                server.player_edit(scene, *pos, PlayerEdit::Break);
             } else {
                 without_drops.push(*pos);
             }
@@ -419,7 +575,7 @@ impl Entities {
             self.world_items.entities.retain(&keep);
             self.server_handed.retain(|_, (_, entity)| keep(entity));
         }
-        self.server.destroy_blocks_without_drops(without_drops);
+        server.destroy_blocks_without_drops(without_drops);
     }
 
     /// A bullet on a mob: an attack with the bullet's damage from where it
@@ -432,6 +588,9 @@ impl Entities {
         yaw: f32,
         credit: Option<sim::voxel::MobAttackCredit>,
     ) {
+        let Some(server) = &mut self.server else {
+            return;
+        };
         let Some(hit) = decode(key) else {
             return;
         };
@@ -448,16 +607,9 @@ impl Entities {
         if let Some(credit) = credit {
             self.next_attack = self.next_attack.wrapping_add(1);
             self.attacks.insert(self.next_attack, credit);
-            self.server.credited_mob_attack(
-                self.next_attack,
-                hit,
-                attack,
-                &Inventory::default(),
-                0,
-            );
+            server.credited_mob_attack(self.next_attack, hit, attack, &Inventory::default(), 0);
         } else {
-            self.server
-                .mob_action(hit, Some(attack), &Inventory::default(), 0, false);
+            server.mob_action(hit, Some(attack), &Inventory::default(), 0, false);
         }
     }
 
@@ -473,9 +625,10 @@ impl Entities {
         day_ticks: i64,
         bright_outside: bool,
         player: &PlayerView,
+        peers: &[PlayerView],
     ) -> (
         Vec<((i32, i32, i32), Option<Block>)>,
-        Vec<(i32, Option<[f64; 3]>)>,
+        Vec<(u64, i32, Option<[f64; 3]>)>,
     ) {
         self.clock += dt;
         let ticked = self.clock >= TICK_SECONDS;
@@ -495,9 +648,9 @@ impl Entities {
             }
             let feet = DVec3::from_array(player.feet);
             let center = ((feet.x.floor() as i32) >> 4, (feet.z.floor() as i32) >> 4);
-            let candidate = PlayerCandidate {
-                id: PLAYER,
-                position: feet,
+            let candidate = |player: &PlayerView| PlayerCandidate {
+                id: player.id,
+                position: DVec3::from_array(player.feet),
                 eye_height: EYE_HEIGHT,
                 main_hand_cow_food: false,
                 offhand_cow_food: false,
@@ -515,44 +668,65 @@ impl Entities {
                 spectator: !player.alive,
                 attackable: player.alive,
             };
-            self.server.tick(TickInput {
-                day_ticks,
-                players: if player.alive {
-                    vec![player.feet]
-                } else {
-                    Vec::new()
-                },
-                difficulty: 2,
-                simulation_center: center,
-                simulation_distance: 8,
-                pickup: player
-                    .alive
-                    .then(|| (player.feet, Box::new(self.inventory.clone()), self.selected)),
-                mob_players: vec![candidate],
-                mob_views: vec![(
-                    PLAYER,
-                    minecraftoss_entities::enderman::PlayerView {
-                        head_yaw: player.yaw,
-                        pitch: player.pitch,
-                        disguised: false,
-                    },
-                )],
-                mob_vitals: vec![(
-                    PLAYER,
-                    minecraftoss_entities::monster_ai::PlayerVitals {
-                        health: player.health * HEALTH_SCALE,
-                        ..Default::default()
-                    },
-                )],
-                bright_outside,
-                tracking: (player.feet, 160.0),
-                player_hurts: Vec::new(),
-                spawn_mobs: true,
-            });
+            let all_players = std::iter::once(player).chain(peers.iter());
+            self.server
+                .as_mut()
+                .expect("host Minecraft entities")
+                .tick(TickInput {
+                    day_ticks,
+                    players: all_players
+                        .clone()
+                        .filter(|p| p.alive)
+                        .map(|p| p.feet)
+                        .collect(),
+                    difficulty: 2,
+                    simulation_center: center,
+                    simulation_distance: 8,
+                    pickup: player
+                        .alive
+                        .then(|| (player.feet, Box::new(self.inventory.clone()), self.selected)),
+                    mob_players: all_players.clone().map(candidate).collect(),
+                    mob_views: all_players
+                        .clone()
+                        .map(|p| {
+                            (
+                                p.id,
+                                minecraftoss_entities::enderman::PlayerView {
+                                    head_yaw: p.yaw,
+                                    pitch: p.pitch,
+                                    disguised: false,
+                                },
+                            )
+                        })
+                        .collect(),
+                    mob_vitals: all_players
+                        .map(|p| {
+                            (
+                                p.id,
+                                minecraftoss_entities::monster_ai::PlayerVitals {
+                                    health: p.health * HEALTH_SCALE,
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect(),
+                    bright_outside,
+                    tracking: (player.feet, 160.0),
+                    player_hurts: Vec::new(),
+                    spawn_mobs: true,
+                });
+        }
+        if self.server.is_none() {
+            return (Vec::new(), Vec::new());
         }
         let mut changes = Vec::new();
         let mut hits = Vec::new();
-        for output in self.server.poll() {
+        for output in self
+            .server
+            .as_mut()
+            .expect("host Minecraft entities")
+            .poll()
+        {
             self.server_handled = output.handled;
             if let Some(snapshot) = output.entities {
                 self.server_snapshot = Some(snapshot);
@@ -606,16 +780,16 @@ impl Entities {
                     self.poof.spawn(feet, width, height);
                 }
             }
-            for hit in output
-                .player_hits
-                .into_iter()
-                .filter(|h| h.player_id == PLAYER)
-            {
+            for hit in output.player_hits {
                 let from = match hit.kind {
                     PlayerHitKind::Melee { attacker, .. } => Some(attacker.to_array()),
                     _ => None,
                 };
-                hits.push(((hit.damage / HEALTH_SCALE).round() as i32, from));
+                hits.push((
+                    hit.player_id,
+                    (hit.damage / HEALTH_SCALE).round() as i32,
+                    from,
+                ));
             }
         }
         if ticked {
@@ -637,6 +811,33 @@ impl Entities {
 
     /// Every living mob's key and box in blocks, for bullets.
     pub(crate) fn boxes(&self) -> Vec<(u64, [f64; 6])> {
+        if self.server.is_none() {
+            return self
+                .remote_mobs
+                .values()
+                .filter_map(|mob| {
+                    let hit = hit_of(mob.visual.kind, mob.visual.id)?;
+                    let p = mob.position().map(f64::from);
+                    let (mut width, mut height) = mob_size(mob.visual.kind);
+                    if mob.visual.flags & 1 != 0 {
+                        width *= 0.5;
+                        height *= 0.5;
+                    }
+                    let half = width * 0.5;
+                    Some((
+                        encode(hit),
+                        [
+                            p[0] - half,
+                            p[1],
+                            p[2] - half,
+                            p[0] + half,
+                            p[1] + height,
+                            p[2] + half,
+                        ],
+                    ))
+                })
+                .collect();
+        }
         let w = &self.world;
         let mut out = Vec::new();
         let mut add = |hit: MobHit, body: &minecraftoss_entities::movement::Body| {
@@ -730,6 +931,28 @@ impl Entities {
         sky_darken: u8,
     ) -> MobMeshes {
         use minecraft_terrain::*;
+        if self.server.is_none() {
+            let mut out = MobMeshes::default();
+            let texture = pack::ResourceId::parse("minecraft:block/white_concrete").unwrap();
+            let region = atlas.region(&texture);
+            for mob in self.remote_mobs.values() {
+                let (mut width, mut height) = mob_size(mob.visual.kind);
+                if mob.visual.flags & 1 != 0 {
+                    width *= 0.5;
+                    height *= 0.5;
+                }
+                let position = mob.position();
+                append_remote_mob(
+                    &mut out.models,
+                    position,
+                    width as f32,
+                    height as f32,
+                    region,
+                    mob.visual.kind,
+                );
+            }
+            return out;
+        }
         // Mobs appear on the client once their trackers start.
         self.client.spawn_missing(&server_mobs(&self.world));
         let w = &self.world;
@@ -942,6 +1165,130 @@ fn bob_offset(id: i32) -> f32 {
         .rotate_left(13)
         .wrapping_mul(0x85eb_ca6b);
     hash as f32 / u32::MAX as f32 * std::f32::consts::TAU
+}
+
+fn mob_size(kind: u8) -> (f64, f64) {
+    match kind {
+        3 | 4 => (0.5, 0.7),
+        7 => (1.4, 0.9),
+        10 => (0.6, 2.9),
+        11 => (1.4, 2.7),
+        12 => (0.9, 0.9),
+        14 => (0.6, 0.85),
+        _ => (0.7, 1.7),
+    }
+}
+
+fn hit_of(kind: u8, id: u64) -> Option<MobHit> {
+    Some(match kind {
+        0 => MobHit::Cow(id),
+        1 => MobHit::Sheep(id),
+        2 => MobHit::Pig(id),
+        3 => MobHit::Chicken(id),
+        4 => MobHit::Bat(id),
+        5 => MobHit::Zombie(id),
+        6 => MobHit::Skeleton(id),
+        7 => MobHit::Spider(id),
+        8 => MobHit::Creeper(id),
+        9 => MobHit::Villager(id),
+        10 => MobHit::Enderman(id),
+        11 => MobHit::IronGolem(id),
+        12 => MobHit::Slime(id),
+        13 => MobHit::Witch(id),
+        14 => MobHit::Wolf(id),
+        _ => return None,
+    })
+}
+
+fn append_remote_mob(
+    mesh: &mut ChunkMesh,
+    feet: [f32; 3],
+    width: f32,
+    height: f32,
+    region: [f32; 4],
+    kind: u8,
+) {
+    let palette = [
+        [0.45, 0.28, 0.18],
+        [0.9, 0.9, 0.85],
+        [0.95, 0.55, 0.65],
+        [0.9, 0.8, 0.3],
+        [0.35, 0.32, 0.3],
+        [0.3, 0.65, 0.25],
+        [0.8, 0.8, 0.75],
+        [0.25, 0.25, 0.28],
+        [0.28, 0.65, 0.35],
+        [0.55, 0.38, 0.25],
+        [0.18, 0.16, 0.22],
+        [0.75, 0.68, 0.61],
+        [0.43, 0.8, 0.43],
+        [0.42, 0.25, 0.48],
+        [0.6, 0.6, 0.58],
+    ];
+    let tint = palette.get(kind as usize).copied().unwrap_or([1.0; 3]);
+    let [x, y, z] = feet;
+    let half = width * 0.5;
+    let lo = [x - half, y, z - half];
+    let hi = [x + half, y + height, z + half];
+    let faces = [
+        [
+            [lo[0], lo[1], hi[2]],
+            [hi[0], lo[1], hi[2]],
+            [hi[0], hi[1], hi[2]],
+            [lo[0], hi[1], hi[2]],
+        ],
+        [
+            [hi[0], lo[1], lo[2]],
+            [lo[0], lo[1], lo[2]],
+            [lo[0], hi[1], lo[2]],
+            [hi[0], hi[1], lo[2]],
+        ],
+        [
+            [lo[0], lo[1], lo[2]],
+            [lo[0], lo[1], hi[2]],
+            [lo[0], hi[1], hi[2]],
+            [lo[0], hi[1], lo[2]],
+        ],
+        [
+            [hi[0], lo[1], hi[2]],
+            [hi[0], lo[1], lo[2]],
+            [hi[0], hi[1], lo[2]],
+            [hi[0], hi[1], hi[2]],
+        ],
+        [
+            [lo[0], hi[1], hi[2]],
+            [hi[0], hi[1], hi[2]],
+            [hi[0], hi[1], lo[2]],
+            [lo[0], hi[1], lo[2]],
+        ],
+        [
+            [lo[0], lo[1], lo[2]],
+            [hi[0], lo[1], lo[2]],
+            [hi[0], lo[1], hi[2]],
+            [lo[0], lo[1], hi[2]],
+        ],
+    ];
+    let uv = [
+        [region[0], region[1]],
+        [region[2], region[1]],
+        [region[2], region[3]],
+        [region[0], region[3]],
+    ];
+    for face in faces {
+        let base = mesh.vertices.len() as u32;
+        for (position, uv) in face.into_iter().zip(uv) {
+            mesh.vertices.push(minecraft_terrain::mesh::Vertex {
+                position,
+                uv,
+                color: [tint[0], tint[1], tint[2], 1.0],
+                sky_light: 15.0,
+                block_light: 0.0,
+            });
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        mesh.faces += 1;
+    }
 }
 
 /// The game's JAR with its loot tables and recipes.
