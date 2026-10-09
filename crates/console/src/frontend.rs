@@ -44,6 +44,22 @@ impl LobbyServices<'_> {
         {
             return Err("Choose a community server in Options to play online".into());
         }
+        if (matches!(
+            &action,
+            net::MasterMenuAction::Host { .. }
+                | net::MasterMenuAction::Join { .. }
+                | net::MasterMenuAction::Refresh
+        ) && !self
+            .intent
+            .as_ref()
+            .is_some_and(|intent| intent.is_browser()))
+            || (matches!(
+                &action,
+                net::MasterMenuAction::Host { .. } | net::MasterMenuAction::Join { .. }
+            ) && self.bridge.is_some())
+        {
+            return Err("Online service is still starting or closing; try again".into());
+        }
         let pending = self.action.as_mut().ok_or("Lobby service is unavailable")?;
         if pending.0.is_some() {
             return Err("A lobby request is already pending".into());
@@ -253,12 +269,16 @@ pub(crate) fn route(
                     if !party.in_lobby || !party.is_host {
                         return Err("Only the lobby host can start a match".into());
                     }
-                    if state.public
-                        && !services.bridge.as_ref().is_some_and(|bridge| {
-                            matches!(bridge.state(), net::MasterBridgeState::Hosting { .. })
-                        })
-                    {
-                        return Err("Wait for the online lobby to connect".into());
+                    if state.public {
+                        match services.bridge.as_ref().map(|bridge| bridge.state()) {
+                            Some(net::MasterBridgeState::Hosting {
+                                in_match: false, ..
+                            }) => {}
+                            Some(net::MasterBridgeState::Hosting { in_match: true, .. }) => {
+                                return Err("Match is already starting".into());
+                            }
+                            _ => return Err("Wait for the online lobby to connect".into()),
+                        }
                     }
                     let (map, mode) = selected_game(&dvars, &maps)?;
                     commands.insert_resource(host_rules(&dvars));
@@ -336,6 +356,11 @@ pub(crate) fn route(
                             .ok_or("Unsupported game mode")?;
                     }
                     if state.public {
+                        if !services.bridge.as_ref().is_some_and(|bridge| {
+                            matches!(bridge.state(), net::MasterBridgeState::Hosting { .. })
+                        }) {
+                            return Err("Wait for the online lobby to connect".into());
+                        }
                         services.submit(net::MasterMenuAction::UpdateLobby {
                             map: map.clone(),
                             mode: mode.token().into(),
@@ -376,6 +401,11 @@ pub(crate) fn route(
                         return Err("Password must be at most 64 bytes".into());
                     }
                     if state.public {
+                        if !services.bridge.as_ref().is_some_and(|bridge| {
+                            matches!(bridge.state(), net::MasterBridgeState::Hosting { .. })
+                        }) {
+                            return Err("Wait for the online lobby to connect".into());
+                        }
                         services.submit(net::MasterMenuAction::SetPassword {
                             password: password.clone(),
                         })?;
@@ -663,17 +693,19 @@ pub(crate) fn route(
             net::MasterBridgeState::Failed { error, .. } => {
                 dvars.set(
                     "ui_frontend_status",
-                    format!("Could not create online lobby: {error:?}"),
+                    format!("Online lobby disconnected: {error:?}"),
                 );
-                if party.is_host {
-                    state.public = false;
-                    *party = UiPartyState::default();
-                    menus.write(UiMenuRequest::Close("game_lobby".into()));
-                    let _ = services.submit(net::MasterMenuAction::LeaveLobby);
-                }
+                state.public = false;
+                *party = UiPartyState::default();
+                menus.write(UiMenuRequest::Close("game_lobby".into()));
+                let _ = services.submit(net::MasterMenuAction::LeaveLobby);
             }
             net::MasterBridgeState::Closed { reason, .. } => {
-                dvars.set("ui_frontend_status", format!("Lobby closed: {reason:?}"))
+                dvars.set("ui_frontend_status", format!("Lobby closed: {reason:?}"));
+                state.public = false;
+                *party = UiPartyState::default();
+                menus.write(UiMenuRequest::Close("game_lobby".into()));
+                let _ = services.submit(net::MasterMenuAction::LeaveLobby);
             }
             _ => {}
         }
