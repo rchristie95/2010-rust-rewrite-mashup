@@ -1,5 +1,9 @@
 use bevy::prelude::*;
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 const ACTIONS: [&str; 26] = [
     "TOGGLE", "LUP", "LDOWN", "LLEFT", "LRIGHT", "RDOWN", "RUP", "RLEFT", "RRIGHT", "A", "B", "X",
@@ -69,6 +73,94 @@ const KEYS: [&str; 32] = [
     "NumEnter+Add",
 ];
 type Bindings = [String; 26];
+
+#[derive(Default)]
+pub(crate) struct KeyboardState {
+    held: HashMap<KeyCode, String>,
+    ollie: bool,
+    flick_until: f32,
+}
+
+pub(crate) fn keyboard_input(
+    keys: &ButtonInput<KeyCode>,
+    dvars: &frame::UiMenuDvars,
+    state: &mut KeyboardState,
+    now: f32,
+    blocked: bool,
+    skating: bool,
+) -> (bool, frame::skate::SkateKeyboardInput) {
+    let mut input = frame::skate::SkateKeyboardInput::default();
+    if blocked {
+        state.held.clear();
+        state.ollie = false;
+        state.flick_until = 0.0;
+        return (false, input);
+    }
+    state.held.retain(|key, _| keys.pressed(*key));
+    for key in keys.get_pressed() {
+        if let Some(chord) = captured_key(*key, keys.pressed(KeyCode::NumpadEnter)) {
+            state.held.entry(*key).or_insert(chord);
+        }
+    }
+    let binding = |index: usize| {
+        dvars
+            .get(&format!("ui_skate_{}", ACTIONS[index]))
+            .unwrap_or(DEFAULTS[index])
+            .to_owned()
+    };
+    let toggle = state
+        .held
+        .iter()
+        .any(|(key, chord)| keys.just_pressed(*key) && *chord == binding(0));
+    if !skating {
+        state.ollie = false;
+        state.flick_until = 0.0;
+        return (toggle, input);
+    }
+    let down = |index: usize| state.held.values().any(|chord| *chord == binding(index));
+    let axis = |positive, negative| (i16::from(down(positive)) - i16::from(down(negative))) * 30000;
+    input.left = [axis(4, 3), axis(1, 2)];
+    input.right = [axis(8, 7), axis(6, 5)];
+    input.triggers = [
+        if down(12) { 255 } else { 0 },
+        if down(13) { 255 } else { 0 },
+    ];
+    for (index, bit) in [
+        (9, 0x1000),
+        (10, 0x2000),
+        (11, 0x4000),
+        (14, 0x0100),
+        (15, 0x0200),
+        (16, 0x8000),
+        (17, 0x0010),
+        (18, 0x0020),
+        (20, 0x0001),
+        (21, 0x0002),
+        (22, 0x0004),
+        (23, 0x0008),
+        (24, 0x0040),
+        (25, 0x0080),
+    ] {
+        if down(index) {
+            input.buttons |= bit;
+        }
+    }
+    let ollie = down(19);
+    if state.ollie && !ollie {
+        state.flick_until = now + 0.12;
+    }
+    state.ollie = ollie;
+    if ollie {
+        input.right = [0, -30000];
+    } else if now < state.flick_until {
+        input.right = [0, 30000];
+    }
+    input.engaged = input.buttons != 0
+        || input.triggers != [0; 2]
+        || input.left != [0; 2]
+        || input.right != [0; 2];
+    (toggle, input)
+}
 
 #[derive(Default)]
 pub(crate) struct SkateControlsState {
@@ -295,6 +387,11 @@ pub(crate) fn native_menu_skate_controls(
     }
     let path = Path::new("keyboard/mapping.ini");
     if state.bindings.is_none() {
+        if !path.exists() && fs::create_dir_all("keyboard").is_ok() {
+            if let Ok(text) = serialize(&defaults()) {
+                let _ = fs::write(path, text);
+            }
+        }
         let loaded = fs::read_to_string(path)
             .map_err(|e| e.to_string())
             .and_then(|source| parse(&source));

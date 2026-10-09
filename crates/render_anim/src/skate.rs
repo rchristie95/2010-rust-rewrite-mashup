@@ -421,7 +421,18 @@ fn update(
         .and_then(|active| active.0)
         .and_then(|entity| gamepads.get(entity).ok());
     host.pad_packet = host.pad_packet.wrapping_add(1);
-    let input = pad.map_or_else(InputFrame::neutral, |pad| pad_frame(pad, host.pad_packet));
+    let input = if mode.keyboard.engaged || pad.is_none() {
+        let keys = mode.keyboard;
+        InputFrame::from_pad(
+            keys.buttons,
+            keys.triggers,
+            keys.left,
+            keys.right,
+            host.pad_packet,
+        )
+    } else {
+        pad.map_or_else(InputFrame::neutral, |pad| pad_frame(pad, host.pad_packet))
+    };
     mode.controller = input.controller();
     host.previous_buttons = input.buttons();
 

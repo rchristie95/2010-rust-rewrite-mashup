@@ -1,5 +1,7 @@
 # Windows keyboard support
 
+Keyboard skating is now handled directly by the game. A separate numpad and **Options > Skate Controls** work without ViGEmBus or a mapper process. The helper below is retained for older builds; current portable builds do not need it.
+
 Source for the numpad controller mapper, physical keypad detection, live configuration reload, and direct-to-Rust launcher. The native **Options > Skate Controls** page is in `crates/ui/menus/skate.json`; its persistence and mapper context are in `crates/console/src/skate_controls.rs`.
 
 The mapper keeps the ordinary keyboard available for PC input. The default skate toggle is Num Lock. `mapping.default.ini` contains the defaults from the current Rust source, including the Num Enter keypad layer. The game writes user settings to `keyboard/mapping.ini`, and the mapper reloads them without reconnecting its virtual controller.

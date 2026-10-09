@@ -1,8 +1,18 @@
 use bevy::prelude::*;
 
+#[derive(Default, Clone, Copy)]
+pub struct SkateKeyboardInput {
+    pub buttons: u16,
+    pub triggers: [u8; 2],
+    pub left: [i16; 2],
+    pub right: [i16; 2],
+    pub engaged: bool,
+}
+
 /// Local skating presentation. Physics remains owned by the optional Skate host.
 #[derive(Resource, Default)]
 pub struct SkateMode {
+    pub keyboard: SkateKeyboardInput,
     pub active: bool,
     pub entering: bool,
     pub preloaded: bool,

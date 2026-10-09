@@ -334,11 +334,13 @@ fn publish_client_action_input(
     binds: Res<KeyBinds>,
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
-    (script_menus, minecraft, mut action_inbox, mut request_ids): (
+    (script_menus, minecraft, mut action_inbox, mut request_ids, dvars, mut skate_keys): (
         Option<Res<hud::ScriptMenus>>,
         Option<Res<frame::MinecraftUi>>,
         Option<ResMut<net::ClientActionInbox>>,
         ResMut<net::ActionRequestIds>,
+        Res<frame::UiMenuDvars>,
+        Local<crate::skate_controls::KeyboardState>,
     ),
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
@@ -442,15 +444,23 @@ fn publish_client_action_input(
         hud_input.killstreak_page = (0..pages).find(|&page| page_has_rewards(page)).unwrap_or(0);
     }
     rewards_changed |= old_page != hud_input.killstreak_page;
-    skate.input_blocked = console.open || script_menu;
-    // The configured keyboard toggle sends the same gesture as both stick clicks.
+    skate.input_blocked = console.open || script_menu || inventory_open || !devices.focused;
+    let (keyboard_toggle, keyboard_input) = crate::skate_controls::keyboard_input(
+        &keys,
+        &dvars,
+        &mut skate_keys,
+        time.elapsed_secs(),
+        skate.input_blocked,
+        skate.active,
+    );
+    skate.keyboard = keyboard_input;
     let sticks_clicked = pad.is_some_and(|pad| {
         use bevy::input::gamepad::GamepadButton::{LeftThumb, RightThumb};
         pad.pressed(LeftThumb)
             && pad.pressed(RightThumb)
             && (pad.just_pressed(LeftThumb) || pad.just_pressed(RightThumb))
     });
-    if !skate.input_blocked && sticks_clicked {
+    if !skate.input_blocked && (sticks_clicked || keyboard_toggle) {
         skate.toggle_requested = true;
     }
     let skate_pad_captured = skate.active || skate.entering || sticks_clicked;

@@ -2,7 +2,7 @@
 
 Skate 3 skating inside [IW4L](https://github.com/vladtrc/iw4L), the from-scratch
 Rust Modern Warfare 2 runtime. Walk around any MW2 map as a soldier, press
-both controller sticks together, or use **Num Lock** with the Windows keyboard mapper, and drop onto a board driven by Skate 3's own physics, tricks and grinds.
+both controller sticks together, or use **Num Lock** on the separate numpad, and drop onto a board driven by Skate 3's own physics, tricks and grinds.
 
 No game files ship with this repository or its releases. You bring your own
 MW2 and Skate 3.
@@ -13,7 +13,7 @@ MW2 and Skate 3.
   Steam version works.
 - **Skate 3 for Xbox 360, extracted**: its `default.xex` with the game's
   `data` folder beside it.
-- An **Xbox / XInput controller**, or the [Windows keyboard mapper](../tools/keyboard/README.md), to skate.
+- An **Xbox / XInput controller**, or a keyboard with a separate numpad, to skate.
 
 ### Where does `default.xex` come from?
 
@@ -58,7 +58,7 @@ Both folders are saved in `.env` next to `iw4l.exe`. Delete `.env` (and
 
 | | |
 |---|---|
-| **Num Lock** with keyboard mapper, or both controller sticks | get on / off the board |
+| **Num Lock** on the separate numpad, or both controller sticks | get on / off the board |
 | controller | skate (Skate 3 flick-it controls) |
 | numpad **0** | push |
 | numpad **Del** | Ollie: hold, then release |
