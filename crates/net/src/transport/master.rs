@@ -368,7 +368,8 @@ impl MasterLaunchIntent {
             (Some(_), Some(_)) => {
                 Err("set only one of IW4L_MASTER_HOST_NAME or IW4L_MASTER_JOIN".into())
             }
-            _ => Err("community master requires IW4L_MASTER_HOST_NAME or IW4L_MASTER_JOIN".into()),
+            (None, None) => Ok(Self::disabled()),
+            _ => Err("community master requires a nonempty IW4L_MASTER_HOST_NAME".into()),
         }
     }
 

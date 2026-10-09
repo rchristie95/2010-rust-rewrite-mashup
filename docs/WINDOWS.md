@@ -37,10 +37,14 @@ The temporary files are `iw4l.update.exe`, `iw4l.previous.exe` and a helper in
 `iw4l.update.lock` serializes update checks; `iw4l.update-helper` records cleanup.
 An update error stops startup and reports the failure; a configured community requires a reachable update origin.
 Without a community descriptor, local development can launch without checking.
+For a custom portable build, a trusted descriptor can set `auto_update = false`
+under `[updates]` and omit `url`. The launcher then keeps its executable while
+using the descriptor's pinned CA for online rooms. Updates to that build must
+be distributed manually.
 
 A descriptor pins a public CA and the master's TLS name for both HTTPS and QUIC.
 Use a descriptor from a trusted source: its operator can distribute executable
-updates. Its settings take precedence over the legacy master environment keys.
+updates when `auto_update` is enabled. Its settings take precedence over the legacy master environment keys.
 One adjacent `.iw4l-server` is selected automatically. With several, choose under
 Options → Community Servers → Apply & Restart; the choice is saved beside the
 executable in `iw4l.community.json`. With no choice, the menu opens offline; `IW4L_COMMUNITY` overrides the saved choice.

@@ -66,11 +66,21 @@ ca_pem = """
 """
 ```
 
+For a portable build that must retain its own executable, use the same trusted
+master address, TLS name and CA, but set `auto_update = false` in `[updates]`.
+The `url` may then be omitted. This selects manual updates only for that
+descriptor; the CA still verifies the QUIC connection to the master. Keep the
+executable and descriptor together when distributing the build. Descriptors
+without `auto_update` continue to check for updates at every Windows startup.
+
 Both TCP and UDP allocations must be open. `serve --updates PATH` selects the
 static update directory; its default is `./updates`. Upload the release blob
 before atomically replacing `manifest.toml`; see [`DEPLOY.md`](DEPLOY.md).
 A community descriptor is required for master networking. Address, TLS name
 and CA come only from that file.
+Launching a local map without `IW4L_MASTER_HOST_NAME` or `IW4L_MASTER_JOIN`
+stays offline even when a descriptor is selected; returning to the menu opens
+the browser on the selected master.
 On Linux, selecting a descriptor retains the locally built executable and
 skips the Windows update flow. `IW4L_COMMUNITY` selects a descriptor next to the
 executable (an absolute path is also accepted).

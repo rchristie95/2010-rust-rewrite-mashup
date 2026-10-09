@@ -53,7 +53,9 @@ fn read_community(path: &Path) -> Result<Community> {
         return Err("unsupported or incomplete community descriptor".into());
     }
     trust_roots(&community.updates.ca_pem)?;
-    update_url(&community)?;
+    if community.updates.auto_update {
+        update_url(&community)?;
+    }
     Ok(community)
 }
 
@@ -175,8 +177,15 @@ pub struct Master {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Updates {
+    #[serde(default)]
     pub url: String,
     pub ca_pem: String,
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+}
+
+fn default_auto_update() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -252,7 +261,7 @@ pub fn startup() -> Result<Option<Vec<OsString>>> {
         return Ok(Some(args));
     };
     let community = read_community(&path)?;
-    if !cfg!(windows) {
+    if !cfg!(windows) || !community.updates.auto_update {
         SELECTED
             .set(community)
             .map_err(|_| "community already selected")?;
