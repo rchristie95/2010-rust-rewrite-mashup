@@ -46,7 +46,7 @@ configuration directory described in the [run guide](docs/RUN.md).
 
 1. Grab the zip from [Releases](../../releases/latest) and extract it somewhere you can write to (not Program Files), or build it yourself (see [docs/BUILD.md](docs/BUILD.md)).
 2. Double-click `iw4l.exe` and confirm your MW2 folder. It then asks whether you have Skate 3: choose **Yes** and select your `default.xex`, or **No** to play without skating.
-3. To play the Minecraft world, go to **Create Game** and pick the **Minecraft** tab in the map list. The map is called **overworld**.
+3. To play the Minecraft world on your own, choose **Create Local Game** and pick the **Minecraft** tab in the map list. The map is called **overworld**. To play with friends, select the same community server, choose **Create Online Game**, and start the match after they join through **Find Lobbies**. Online creation selects Minecraft by default when it is installed.
 
    You can also double-click `Minecraft World.bat` in the release folder, start the game with `iw4l.exe map minecraft:overworld`, or open the console with the backtick key (`` ` ``, under Esc) and type `map minecraft:overworld`.
 

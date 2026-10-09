@@ -6,7 +6,7 @@ Two players through the dev master: `make approved SCENARIO=master_duo_chaos`
 
 ```bash
 set -a; . ./.env; set +a          # IW4L_GAMES; DISPLAY=:0 if the session has none
-make map mp_boneyard CMDS='spawn 0; wait 2s; quit'
+make map mp_boneyard CMDS='spawn; wait 2s; quit'
 cargo run --profile play -p launcher -- map iw5:mp_overwatch --cmds '…'
 ```
 
@@ -27,7 +27,7 @@ game setup.
 **GSC controls the start freeze.** `freezecontrols` constrains authority movement;
 snapshots carry the same constraints into client prediction and command replay.
 Wait for the loaded mode's countdown, or use the debug command:
-`wait world; spawn 0; force_match_start; wait 1s; …`.
+`wait world; spawn; force_match_start; wait 1s; …`.
 Firing, hit and decal probes must start after the countdown releases the player.
 
 **Sync by default.** Ritual `wait`s are unnecessary: a command holds the FIFO
@@ -76,8 +76,8 @@ received plus its own presented state; `demo LATEST` plays it back.
 * `give ammo` refills carried reserves and equipment; reload magazines normally. Supply commands require a live player and a host allowing debug actions.
 * `bot` hints follow the subcommand: counts, on/off, current bot IDs, weapons, and `tp … above`.
 * custom classes live in `iw4l-artifacts/profile/classes.txt` (one tab-separated
-  row per class); `spawn 0` selects the first slot. Delete the file to generate
-  five available classes again. Random presets use a pool of 20: five each for
+  row per class); `spawn` selects the highlighted slot after class selection is
+  ready. Delete the file to generate five available classes again. Random presets use a pool of 20: five each for
   IW4, IW5, T5 and T6, with IW4 equipment. Players and bots select only
   presets supported by the loaded weapons, attachments and equipment.
 
