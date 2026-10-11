@@ -7,6 +7,7 @@ Build on Windows with the Rust MSVC toolchain:
 ```powershell
 New-Item -ItemType Directory -Force tools/portable/bin
 rustc --edition 2024 -C opt-level=2 -C target-feature=+crt-static tools/portable/play.rs -o tools/portable/bin/Play.exe
+rustc --edition 2024 --cfg online_menu -C opt-level=2 -C target-feature=+crt-static tools/portable/play.rs -o tools/portable/bin/Multiplayer.exe
 ```
 
 Prepare a writable folder with this layout, using your own game files:
@@ -28,7 +29,7 @@ The converted Skate assets and completed Minecraft resource folder come from the
 
 The launcher anchors paths at its own directory and writes `.env` for this folder layout. Double-click `Play.exe` after extracting the entire folder. Run `Play.exe --check` to check the required launcher files without starting the game; it writes `launcher-check.txt` or `launcher-error.txt`. This check does not validate every game archive or GPU support.
 
-For multiplayer, use End Game to return to the menu, then Create Online Game or Find Lobbies. `Play.exe --menu` opens that menu directly. Players must use matching builds and a descriptor for the same relay, as described in [MASTER.md](../../docs/MASTER.md). A descriptor with `[updates] auto_update=false` keeps the packaged build and still verifies the relay certificate.
+For multiplayer, double-click `Multiplayer.exe`, or use End Game to return to the menu, then Create Online Game or Find Lobbies. `Play.exe --menu` also opens that menu directly. Players must use matching builds and a descriptor for the same relay, as described in [MASTER.md](../../docs/MASTER.md). A descriptor with `[updates] auto_update=false` keeps the packaged build and still verifies the relay certificate.
 
 To run the relay on Windows, build `cargo build -p iw4l-master --profile play --locked`. Place the resulting executable, `server.ps1`, and the provisioned `server-cert.pem`, `server-key.pem`, and `ca.pem` in a separate private server folder. Run `./server.ps1` to start it in the background, `./server.ps1 -Action Status` to check it, or `./server.ps1 -Action Stop` to stop it. Keep the private key and server folder out of player ZIPs; only the public CA belongs in client descriptors.
 

@@ -44,7 +44,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let mut game = Command::new(root.join("iw4l.exe"));
-    if env::args().any(|arg| arg == "--menu") {
+    if cfg!(online_menu) || env::args().any(|arg| arg == "--menu") {
         game.arg("menu");
     } else {
         game.args(["map", "minecraft:overworld", "--cmds", COMMANDS]);
