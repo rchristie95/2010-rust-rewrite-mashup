@@ -875,19 +875,15 @@ fn update(
         None
     };
     ui.loading_world = !*was_alive && spawn_at.is_none();
-    if alive
-        && !*was_alive
-        && let Some(at) = spawn_at
-        && authority
-            .as_mut()
-            .is_some_and(|authority| authority.0.teleport(local.0, at))
-    {
-        diag::info!(
-            World,
-            "Minecraft spawn: moved to clear world spawn {:?}",
-            at
-        );
-        *was_alive = true;
+    if alive && !*was_alive && let Some(at) = spawn_at {
+        if let Some(authority) = authority.as_mut() {
+            if authority.0.teleport(local.0, at) {
+                diag::info!(World, "Minecraft spawn: moved to clear world spawn {:?}", at);
+                *was_alive = true;
+            }
+        } else if *role == frame::RuntimeRole::Client {
+            *was_alive = true;
+        }
     }
 
     // Minecraft's yaw: 0 facing +Z (map -Y), turning towards -X.
