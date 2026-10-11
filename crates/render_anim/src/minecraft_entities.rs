@@ -7,7 +7,7 @@
 //! (a hundred MW2 health to Minecraft's twenty), and mobs hurt the player
 //! the other way round.
 use glam::{DVec3, Vec3};
-use minecraft_terrain::client_mobs::{ClientMobs, server_mobs};
+use minecraft_terrain::client_mobs::{ClientMobs, ServerMob, server_mobs};
 use minecraft_terrain::lighting::SkyLight;
 use minecraft_terrain::mesh::ItemVisuals;
 use minecraft_terrain::mesh::{Atlas, ChunkMesh};
@@ -277,7 +277,8 @@ impl Entities {
         let now = Instant::now();
         let mut seen = HashSet::new();
         for visual in snapshot.iter().take(128) {
-            if visual.kind > 14
+            if visual.id == 0
+                || visual.kind > 14
                 || !visual.position.into_iter().all(f32::is_finite)
                 || ![visual.yaw, visual.pitch, visual.head_yaw]
                     .into_iter()
@@ -300,6 +301,109 @@ impl Entities {
                 });
         }
         self.remote_mobs.retain(|id, _| seen.contains(id));
+        let mut world = EntityWorld::default();
+        let mut ordered: Vec<_> = self.remote_mobs.values().collect();
+        ordered.sort_by_key(|mob| mob.visual.id);
+        for mob in ordered {
+            let visual = &mob.visual;
+            let position = DVec3::from_array(visual.position.map(f64::from));
+            let baby = visual.flags & 1 != 0;
+            world.set_next_entity_id(visual.id);
+            let id = match visual.kind {
+                0 => {
+                    let mut cow = minecraftoss_entities::cow::Cow::new(position);
+                    if baby {
+                        cow.age.set(-24_000);
+                    }
+                    world.spawn_cow(cow, true)
+                }
+                1 => {
+                    let mut sheep = minecraftoss_entities::sheep::Sheep::default();
+                    if baby {
+                        sheep.age.set(-24_000);
+                    }
+                    world.spawn_sheep(sheep, position, true)
+                }
+                2 => {
+                    let mut pig = minecraftoss_entities::pig::Pig::new(position);
+                    if baby {
+                        pig.age.set(-24_000);
+                    }
+                    world.spawn_pig(pig, true)
+                }
+                3 => {
+                    let mut chicken = minecraftoss_entities::chicken::Chicken::new(position);
+                    if baby {
+                        chicken.age.set(-24_000);
+                    }
+                    world.spawn_chicken(chicken, true)
+                }
+                4 => {
+                    let id = world.spawn_bat(minecraftoss_entities::bat::Bat::new(position), true);
+                    if let Some(bat) = world.bat_mut(id) {
+                        bat.bat.resting = visual.flags & 4 != 0;
+                    }
+                    id
+                }
+                5 => {
+                    let mut zombie = minecraftoss_entities::zombie::Zombie::new(position);
+                    zombie.baby = baby;
+                    world.spawn_zombie(zombie, true)
+                }
+                6 => world.spawn_skeleton(
+                    minecraftoss_entities::skeleton::Skeleton::new(position),
+                    true,
+                ),
+                7 => world.spawn_spider(minecraftoss_entities::spider::Spider::new(position), true),
+                8 => world
+                    .spawn_creeper(minecraftoss_entities::creeper::Creeper::new(position), true),
+                9 => {
+                    let mut villager = minecraftoss_entities::villager::Villager::new(position);
+                    if baby {
+                        villager.age.set(-24_000);
+                    }
+                    world.spawn_villager(villager, true)
+                }
+                10 => world.spawn_enderman(
+                    minecraftoss_entities::enderman::Enderman::new(position),
+                    true,
+                ),
+                11 => world.spawn_iron_golem(
+                    minecraftoss_entities::iron_golem::IronGolem::new(position),
+                    true,
+                ),
+                12 => {
+                    world.spawn_slime(minecraftoss_entities::slime::Slime::new(position, 2), true)
+                }
+                13 => world.spawn_witch(minecraftoss_entities::witch::Witch::new(position), true),
+                14 => {
+                    let mut wolf = minecraftoss_entities::wolf::Wolf::new(position);
+                    if baby {
+                        wolf.age.set(-24_000);
+                    }
+                    world.spawn_wolf(wolf, true)
+                }
+                _ => continue,
+            };
+            debug_assert_eq!(id, visual.id);
+        }
+        let batch: Vec<ServerMob> = server_mobs(&world)
+            .into_iter()
+            .filter_map(|mut entity| {
+                let visual = &self.remote_mobs.get(&entity.id)?.visual;
+                entity.position = DVec3::from_array(visual.position.map(f64::from));
+                entity.y_rot = visual.yaw;
+                entity.x_rot = visual.pitch;
+                entity.y_head_rot = visual.head_yaw;
+                entity.baby = visual.flags & 1 != 0;
+                entity.on_ground = visual.flags & 2 != 0;
+                entity.resting = visual.flags & 4 != 0;
+                entity.dead = visual.flags & 8 != 0;
+                Some(entity)
+            })
+            .collect();
+        self.world = world;
+        self.client.receive(batch);
     }
 
     pub(crate) fn unload_chunk(&mut self, pos: minecraftoss_core::ChunkPos) {
@@ -524,6 +628,43 @@ impl Entities {
         true
     }
 
+    pub(crate) fn remote_punch(
+        &mut self,
+        player_id: u64,
+        eye: DVec3,
+        look: DVec3,
+        yaw: f32,
+        credit: sim::voxel::MobAttackCredit,
+    ) -> bool {
+        let Some(server) = &mut self.server else {
+            return false;
+        };
+        if !eye.is_finite() || !look.is_finite() || !yaw.is_finite() {
+            return false;
+        }
+        let length = look.length();
+        if !(0.9..=1.1).contains(&length) {
+            return false;
+        }
+        let Some((hit, _)) = self.world.mob_on_ray(eye, look / length, 3.0) else {
+            return false;
+        };
+        let attack = minecraftoss_entities::world::PlayerAttack {
+            player_id,
+            position: eye - DVec3::Y * f64::from(EYE_HEIGHT),
+            yaw,
+            attack_damage: 1.0,
+            strength: 1.0,
+            sprinting: false,
+            can_critical: false,
+            can_sweep: false,
+        };
+        self.next_attack = self.next_attack.wrapping_add(1);
+        self.attacks.insert(self.next_attack, credit);
+        server.credited_mob_attack(self.next_attack, hit, attack, &Inventory::default(), 0);
+        true
+    }
+
     /// A block the player placed, for the level the mobs walk in.
     pub(crate) fn placed(&mut self, scene: &HandcraftedScene, pos: (i32, i32, i32)) {
         if let Some(server) = &mut self.server {
@@ -632,6 +773,14 @@ impl Entities {
     ) {
         self.clock += dt;
         let ticked = self.clock >= TICK_SECONDS;
+        if self.server.is_none() {
+            if ticked {
+                self.clock = (self.clock - TICK_SECONDS).min(TICK_SECONDS);
+                self.ticks += 1;
+                self.client.tick();
+            }
+            return (Vec::new(), Vec::new());
+        }
         if ticked {
             self.clock = (self.clock - TICK_SECONDS).min(TICK_SECONDS);
             self.ticks += 1;
@@ -715,9 +864,6 @@ impl Entities {
                     player_hurts: Vec::new(),
                     spawn_mobs: true,
                 });
-        }
-        if self.server.is_none() {
-            return (Vec::new(), Vec::new());
         }
         let mut changes = Vec::new();
         let mut hits = Vec::new();
@@ -815,6 +961,7 @@ impl Entities {
             return self
                 .remote_mobs
                 .values()
+                .filter(|mob| mob.visual.flags & 8 == 0)
                 .filter_map(|mob| {
                     let hit = hit_of(mob.visual.kind, mob.visual.id)?;
                     let p = mob.position().map(f64::from);
@@ -931,30 +1078,10 @@ impl Entities {
         sky_darken: u8,
     ) -> MobMeshes {
         use minecraft_terrain::*;
-        if self.server.is_none() {
-            let mut out = MobMeshes::default();
-            let texture = pack::ResourceId::parse("minecraft:block/white_concrete").unwrap();
-            let region = atlas.region(&texture);
-            for mob in self.remote_mobs.values() {
-                let (mut width, mut height) = mob_size(mob.visual.kind);
-                if mob.visual.flags & 1 != 0 {
-                    width *= 0.5;
-                    height *= 0.5;
-                }
-                let position = mob.position();
-                append_remote_mob(
-                    &mut out.models,
-                    position,
-                    width as f32,
-                    height as f32,
-                    region,
-                    mob.visual.kind,
-                );
-            }
-            return out;
-        }
         // Mobs appear on the client once their trackers start.
-        self.client.spawn_missing(&server_mobs(&self.world));
+        if self.server.is_some() {
+            self.client.spawn_missing(&server_mobs(&self.world));
+        }
         let w = &self.world;
         let poses = &self.client;
         let partial = (self.clock / TICK_SECONDS).clamp(0.0, 1.0) as f32;
@@ -1198,97 +1325,6 @@ fn hit_of(kind: u8, id: u64) -> Option<MobHit> {
         14 => MobHit::Wolf(id),
         _ => return None,
     })
-}
-
-fn append_remote_mob(
-    mesh: &mut ChunkMesh,
-    feet: [f32; 3],
-    width: f32,
-    height: f32,
-    region: [f32; 4],
-    kind: u8,
-) {
-    let palette = [
-        [0.45, 0.28, 0.18],
-        [0.9, 0.9, 0.85],
-        [0.95, 0.55, 0.65],
-        [0.9, 0.8, 0.3],
-        [0.35, 0.32, 0.3],
-        [0.3, 0.65, 0.25],
-        [0.8, 0.8, 0.75],
-        [0.25, 0.25, 0.28],
-        [0.28, 0.65, 0.35],
-        [0.55, 0.38, 0.25],
-        [0.18, 0.16, 0.22],
-        [0.75, 0.68, 0.61],
-        [0.43, 0.8, 0.43],
-        [0.42, 0.25, 0.48],
-        [0.6, 0.6, 0.58],
-    ];
-    let tint = palette.get(kind as usize).copied().unwrap_or([1.0; 3]);
-    let [x, y, z] = feet;
-    let half = width * 0.5;
-    let lo = [x - half, y, z - half];
-    let hi = [x + half, y + height, z + half];
-    let faces = [
-        [
-            [lo[0], lo[1], hi[2]],
-            [hi[0], lo[1], hi[2]],
-            [hi[0], hi[1], hi[2]],
-            [lo[0], hi[1], hi[2]],
-        ],
-        [
-            [hi[0], lo[1], lo[2]],
-            [lo[0], lo[1], lo[2]],
-            [lo[0], hi[1], lo[2]],
-            [hi[0], hi[1], lo[2]],
-        ],
-        [
-            [lo[0], lo[1], lo[2]],
-            [lo[0], lo[1], hi[2]],
-            [lo[0], hi[1], hi[2]],
-            [lo[0], hi[1], lo[2]],
-        ],
-        [
-            [hi[0], lo[1], hi[2]],
-            [hi[0], lo[1], lo[2]],
-            [hi[0], hi[1], lo[2]],
-            [hi[0], hi[1], hi[2]],
-        ],
-        [
-            [lo[0], hi[1], hi[2]],
-            [hi[0], hi[1], hi[2]],
-            [hi[0], hi[1], lo[2]],
-            [lo[0], hi[1], lo[2]],
-        ],
-        [
-            [lo[0], lo[1], lo[2]],
-            [hi[0], lo[1], lo[2]],
-            [hi[0], lo[1], hi[2]],
-            [lo[0], lo[1], hi[2]],
-        ],
-    ];
-    let uv = [
-        [region[0], region[1]],
-        [region[2], region[1]],
-        [region[2], region[3]],
-        [region[0], region[3]],
-    ];
-    for face in faces {
-        let base = mesh.vertices.len() as u32;
-        for (position, uv) in face.into_iter().zip(uv) {
-            mesh.vertices.push(minecraft_terrain::mesh::Vertex {
-                position,
-                uv,
-                color: [tint[0], tint[1], tint[2], 1.0],
-                sky_light: 15.0,
-                block_light: 0.0,
-            });
-        }
-        mesh.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        mesh.faces += 1;
-    }
 }
 
 /// The game's JAR with its loot tables and recipes.
