@@ -91,6 +91,36 @@ mod water_tests {
         assert!(spawn_at([dry[0], dry[1]]).is_some());
         assert!(spawn_at([deep[0], deep[1]]).is_none());
         assert!(spawn_at([shallow[0], shallow[1]]).is_none());
+        // A crowd returning from unloaded terrain must occupy separate dry
+        // columns, including on vertically separated floors.
+        for z in -3..=2 {
+            for x in -3..=2 {
+                if (x, z) == (0, 0) {
+                    continue;
+                }
+                let mut shapes = vec![0; 4 * 256];
+                shapes[..256].fill(1);
+                set_chunk(
+                    x,
+                    z,
+                    VoxelChunk {
+                        min_y: 0,
+                        height: 4,
+                        shapes,
+                    },
+                );
+            }
+        }
+        let mut placed = vec![dry];
+        assert!(spawn_existing([dry[0], dry[1], 1000.0], &placed).is_none());
+        for _ in 0..18 {
+            let next = spawn_clear(&placed).expect("dry arena has room for 19 combatants");
+            assert_eq!(water_level(next, 69.0), 0);
+            for other in &placed {
+                assert!((next[0] - other[0]).hypot(next[1] - other[1]) >= BLOCK * 8.0);
+            }
+            placed.push(next);
+        }
         // Editing a fluid block out immediately removes its water query.
         set_block_shape(2, 1, 5, 0);
         assert!(!water_at(point(2.5, 1.05)));
@@ -708,9 +738,9 @@ pub fn spawn_area_ready(radius: i32) -> bool {
 
 fn spawn_unoccupied(feet: [f32; 3], avoid: &[[f32; 3]]) -> bool {
     avoid.iter().all(|other| {
-        (feet[0] - other[0]).abs() >= 30.0
-            || (feet[1] - other[1]).abs() >= 30.0
-            || (feet[2] - other[2]).abs() >= 70.0
+        // Keep separate horizontal landing areas even on different tree/cave
+        // floors. A clear body box alone still allows combatants to pile up.
+        (feet[0] - other[0]).powi(2) + (feet[1] - other[1]).powi(2) >= (BLOCK * 8.0).powi(2)
     })
 }
 
@@ -749,7 +779,29 @@ pub fn spawn_clear(avoid: &[[f32; 3]]) -> Option<[f32; 3]> {
             }
         }
     }
-    best.or_else(|| spawn_existing(spawn_origin()?, avoid))
+    if best.is_none() {
+        // Craters and water can invalidate every coarse grid point. Search
+        // between them while preserving the same separation requirement.
+        for x in -16..=16 {
+            for y in -16..=16 {
+                if let Some(feet) = spawn_at([
+                    center[0] + x as f32 * BLOCK * 2.0,
+                    center[1] + y as f32 * BLOCK * 2.0,
+                ]) && spawn_unoccupied(feet, avoid)
+                {
+                    let distance = avoid
+                        .iter()
+                        .map(|other| (feet[0] - other[0]).powi(2) + (feet[1] - other[1]).powi(2))
+                        .fold(f32::INFINITY, f32::min);
+                    if distance > best_distance {
+                        best = Some(feet);
+                        best_distance = distance;
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Standable supports for navigation in the loaded Minecraft arena. This is

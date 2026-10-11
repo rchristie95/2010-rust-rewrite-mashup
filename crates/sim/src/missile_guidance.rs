@@ -86,6 +86,22 @@ pub(crate) fn steer(
         projectile.guide.target = None;
         return;
     };
+    steer_to_point(
+        projectile,
+        point,
+        world.player(projectile.owner).map(|ps| ps.origin),
+        now,
+        facts,
+    );
+}
+
+fn steer_to_point(
+    projectile: &mut crate::ProjectileState,
+    point: [f32; 3],
+    owner_origin: Option<[f32; 3]>,
+    now: i32,
+    facts: crate::EquipmentRuntimeFacts,
+) {
     let origin = Vec3::from_array(projectile.origin);
     let velocity = Vec3::from_array(projectile.velocity);
     let Some(forward) = velocity.try_normalize() else {
@@ -120,9 +136,9 @@ pub(crate) fn steer(
                     10000.0
                 };
                 if !projectile.guide.top
-                    && let Some(owner) = world.player(projectile.owner)
+                    && let Some(owner) = owner_origin
                 {
-                    let toward_owner = (Vec3::from_array(owner.origin) - goal)
+                    let toward_owner = (Vec3::from_array(owner) - goal)
                         .truncate()
                         .normalize_or_zero();
                     goal.x += toward_owner.x * 700.0;
@@ -151,17 +167,11 @@ pub(crate) fn steer(
         if turn <= 0.1 || turn <= rate * seconds {
             (wanted, 0.0)
         } else {
-            let rotation = |dir: Vec3| {
-                let angles = math_iw4::vect_to_angles(dir.to_array());
-                glam::Quat::from_euler(
-                    glam::EulerRot::ZYX,
-                    angles[1].to_radians(),
-                    angles[0].to_radians(),
-                    0.0,
-                )
-            };
             (
-                rotation(forward).slerp(rotation(wanted), rate * seconds / turn) * Vec3::X,
+                // IW4 pitch is positive down, whereas a Z-up direction must
+                // climb towards positive Z. Interpolate vectors directly to
+                // avoid reversing pitch when converting through Euler angles.
+                turn_toward(forward, wanted, rate.to_radians() * seconds),
                 turn,
             )
         }
@@ -193,4 +203,73 @@ pub(crate) fn steer(
         tr_base: projectile.origin,
     };
     projectile.apos = entity_iw4::fire_missile_apos(direction.to_array());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn javelin_climbs_then_dives_onto_its_locked_point() {
+        let point = [2200.0, 900.0, 0.0];
+        let mut missile = crate::ProjectileState {
+            id: crate::ProjectileId(1),
+            owner: crate::ClientId(0),
+            owner_life: crate::LifeSequence(1),
+            weapon: 1,
+            origin: [0.0, 0.0, 60.0],
+            velocity: [250.0, 0.0, 100.0],
+            pos: entity_iw4::Trajectory::default(),
+            apos: entity_iw4::Trajectory::default(),
+            entnum: 64,
+            launch_time: 0,
+            spawn_time_ms: 0,
+            detonate_at_ms: None,
+            cleanup_at_ms: 60000,
+            travel_distance: 0.0,
+            live: true,
+            stuck_pane: None,
+            grounded: false,
+            guide: MissileGuide {
+                target: Some(MissileTarget::Point(point)),
+                top: true,
+                ..Default::default()
+            },
+            attached_to: None,
+        };
+        let facts = crate::EquipmentRuntimeFacts {
+            missile_guidance: 3,
+            ignition_delay_ms: 500,
+            ..Default::default()
+        };
+        let before = missile.velocity;
+        steer_to_point(&mut missile, point, None, 499, facts);
+        assert_eq!(missile.velocity, before);
+        let mut highest = missile.origin[2];
+        let mut reached = false;
+        for tick in 10..1200 {
+            steer_to_point(&mut missile, point, None, tick * 50, facts);
+            missile.origin = (Vec3::from_array(missile.origin)
+                + Vec3::from_array(missile.velocity) * 0.05)
+                .to_array();
+            highest = highest.max(missile.origin[2]);
+            if Vec3::from_array(missile.origin).distance(Vec3::from_array(point)) < 100.0 {
+                assert_eq!(missile.guide.stage, 2);
+                assert!(missile.velocity[2] < 0.0);
+                reached = true;
+                break;
+            }
+            assert!(
+                missile.origin[2] > 0.0,
+                "rocket hit the launch terrain before reaching its target: {:?}",
+                missile.origin
+            );
+        }
+        assert!(highest > 3000.0, "top attack never climbed: {highest}");
+        assert!(
+            reached,
+            "rocket missed its locked target: {:?}",
+            missile.origin
+        );
+    }
 }

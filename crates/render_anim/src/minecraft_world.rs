@@ -826,17 +826,37 @@ fn update(
             let Some(remote) = authority.0.player(id) else {
                 continue;
             };
+            if remote.health <= 0 || remote.pm_type != 0 {
+                continue;
+            }
             let remote_feet = sim::voxel::to_block(origin, remote.origin);
             let peer_chunk = (
                 remote_feet[0].floor() as i32 >> 4,
                 remote_feet[2].floor() as i32 >> 4,
             );
-            let center_chunk = (stream_block.0 >> 4, stream_block.2 >> 4);
+            // A killstreak camera can stream terrain far from the player's
+            // body. It must not repeatedly relocate combatants in the arena.
+            let center_chunk = player_chunk;
             if (peer_chunk.0 - center_chunk.0).abs() > 5
                 || (peer_chunk.1 - center_chunk.1).abs() > 5
             {
-                let safe = [ps.origin[0] + 64.0, ps.origin[1], ps.origin[2]];
-                if authority.0.teleport(id, safe) {
+                // Recover each player against the current authoritative positions.
+                // A fixed offset piled all returning bots into the same body box.
+                let avoid: Vec<_> = authority
+                    .0
+                    .clients_scoreboard()
+                    .into_iter()
+                    .filter_map(|(other, _)| {
+                        (other != id)
+                            .then(|| authority.0.player(other))
+                            .flatten()
+                            .filter(|player| player.pm_type == 0 && player.health > 0)
+                            .map(|player| player.origin)
+                    })
+                    .collect();
+                if let Some(safe) = sim::voxel::spawn_clear(&avoid)
+                    && authority.0.teleport(id, safe)
+                {
                     diag::warn!(
                         World,
                         "Minecraft player {} returned to the shared loaded area",
