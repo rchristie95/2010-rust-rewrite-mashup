@@ -390,6 +390,15 @@ fn block_shape(
     }
     *shapes.entry(state).or_insert_with(|| {
         let boxes = blocks.collision_boxes(state);
+        if let Some(fluid) = blocks.state(state).fluid
+            && fluid.kind == minecraftoss_core::block::FluidKind::Water
+        {
+            return sim::voxel::add_water_shape(
+                boxes.iter().map(|b| b.map(|v| v as f32)).collect(),
+                fluid.amount,
+            )
+            .unwrap_or(0);
+        }
         if boxes.is_empty() {
             return 0;
         }
@@ -853,23 +862,7 @@ fn update(
                         ids[((y as usize * 16) + z) * 16 + x] = id;
                         continue;
                     }
-                    let id = *shapes.entry(state).or_insert_with(|| {
-                        let boxes = blocks.collision_boxes(state);
-                        if boxes.is_empty() {
-                            return 0;
-                        }
-                        let key: Vec<[u32; 6]> = boxes
-                            .iter()
-                            .map(|b| b.map(|v| (v as f32).to_bits()))
-                            .collect();
-                        if let Some(&id) = shape_ids.get(&key) {
-                            return id;
-                        }
-                        let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
-                        let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
-                        shape_ids.insert(key, id);
-                        id
-                    });
+                    let id = block_shape(blocks, state, shapes, shape_ids);
                     last = Some((state, id));
                     ids[((y as usize * 16) + z) * 16 + x] = id;
                 }
@@ -1055,15 +1048,7 @@ fn update(
                         let placed_state =
                             placed_block.and_then(|b| world.stream.states.state_of(b));
                         let shape = placed_state.map_or(0, |id| {
-                            let boxes = world.registries.blocks.collision_boxes(id);
-                            if boxes.is_empty() {
-                                0
-                            } else {
-                                sim::voxel::add_shapes(vec![
-                                    boxes.iter().map(|b| b.map(|v| v as f32)).collect(),
-                                ])
-                                .unwrap_or(0)
-                            }
+                            block_shape(&world.registries.blocks, id, shapes, shape_ids)
                         });
                         sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
                         world.stream.record_edits(&world.scene, &[pos]);
@@ -1339,25 +1324,8 @@ fn update(
                 } else if let Some(block) = block {
                     let state = world.stream.states.state_of(&block);
                     let blocks = &world.registries.blocks;
-                    let shape = state.map_or(0, |state| {
-                        *shapes.entry(state).or_insert_with(|| {
-                            let boxes = blocks.collision_boxes(state);
-                            if boxes.is_empty() {
-                                return 0;
-                            }
-                            let key: Vec<[u32; 6]> = boxes
-                                .iter()
-                                .map(|b| b.map(|v| (v as f32).to_bits()))
-                                .collect();
-                            if let Some(&id) = shape_ids.get(&key) {
-                                return id;
-                            }
-                            let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
-                            let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
-                            shape_ids.insert(key, id);
-                            id
-                        })
-                    });
+                    let shape =
+                        state.map_or(0, |state| block_shape(blocks, state, shapes, shape_ids));
                     sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
                     world.stream.record_edits(&world.scene, &[pos]);
                     world.stream.mark_edited(&world.scene, &[pos]);
@@ -1660,25 +1628,7 @@ fn update(
             for (pos, block) in changes {
                 changed_blocks.insert(pos);
                 let state = block.as_ref().and_then(|b| world.stream.states.state_of(b));
-                let shape = state.map_or(0, |state| {
-                    *shapes.entry(state).or_insert_with(|| {
-                        let boxes = blocks.collision_boxes(state);
-                        if boxes.is_empty() {
-                            return 0;
-                        }
-                        let key: Vec<[u32; 6]> = boxes
-                            .iter()
-                            .map(|b| b.map(|v| (v as f32).to_bits()))
-                            .collect();
-                        if let Some(&id) = shape_ids.get(&key) {
-                            return id;
-                        }
-                        let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
-                        let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
-                        shape_ids.insert(key, id);
-                        id
-                    })
-                });
+                let shape = state.map_or(0, |state| block_shape(blocks, state, shapes, shape_ids));
                 sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
                 world.scene.set(pos, block);
                 positions.push(pos);

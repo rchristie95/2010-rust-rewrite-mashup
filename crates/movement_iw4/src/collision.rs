@@ -4,6 +4,11 @@ use crate::GroundTraceInput;
 use crate::correct_solid::{CorrectSolidOutcome, correct_solid};
 
 pub trait CollisionBackend {
+    /// Wet feet/body/eyes (0..=3). Dry maps retain the native movement path.
+    fn water_level(&self, _origin: [f32; 3], _view_height: f32) -> u8 {
+        0
+    }
+
     fn trace(&self, input: GroundTraceInput) -> Trace;
 
     fn correct_solid(

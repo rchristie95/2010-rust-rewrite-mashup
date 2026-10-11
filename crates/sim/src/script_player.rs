@@ -102,6 +102,7 @@ pub(crate) fn spawn(
         let meta = world.client_meta_mut(id);
         meta.lifecycle = lifecycle;
         meta.controls = crate::ScriptControls::default();
+        meta.minecraft_air = crate::water::AirSupply::default();
         if lifecycle != ClientLifecycle::Alive {
             return;
         }

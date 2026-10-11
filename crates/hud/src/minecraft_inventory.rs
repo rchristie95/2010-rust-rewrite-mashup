@@ -453,6 +453,38 @@ pub(crate) fn update_minecraft_hud(
     let weapons = bound.as_ref();
     let strings = strings.as_deref();
 
+    if let Some((_, value)) = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .and_then(|meta| {
+            meta.client_dvars
+                .iter()
+                .find(|(key, _)| key == sim::water::AIR_DVAR)
+        })
+        && let Some((air, underwater)) = value.split_once(':')
+        && let Ok(air) = air.parse::<i32>()
+        && (underwater == "1" || air < sim::water::AIR_CAPACITY_MS)
+    {
+        let fraction = (air as f32 / sim::water::AIR_CAPACITY_MS as f32).clamp(0.0, 1.0);
+        let color = if fraction < 0.2 {
+            [1.0, 0.3, 0.2, 1.0]
+        } else {
+            [0.4, 0.8, 1.0, 1.0]
+        };
+        canvas.fill(-80.0, -105.0, 160.0, 5.0, PANEL, (CENTER, MAX));
+        canvas.fill(-80.0, -105.0, 160.0 * fraction, 5.0, color, (CENTER, MAX));
+        canvas.text(
+            FONT_COUNT,
+            -80.0,
+            -119.0,
+            10.0,
+            color,
+            &format!("AIR {}s", (air + 999) / 1000),
+            false,
+            (CENTER, MAX),
+        );
+    }
+
     if !ui.inventory_open {
         // The hotbar: scroll and number keys pick, Q throws.
         let mut scroll = 0i32;

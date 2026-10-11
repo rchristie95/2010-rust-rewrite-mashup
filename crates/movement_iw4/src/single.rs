@@ -172,6 +172,30 @@ pub fn pmove<C: CollisionBackend, L: MantleXAnimLength, R: MantleRootDelta>(
         };
     }
 
+    let water_level = collision.water_level(ps.origin, ps.view_height_current);
+    // Keep rising through the last few inches at the surface. Shallow-water
+    // jumps from the ground still use the normal jump impulse.
+    if water_level >= 2
+        || (water_level == 1
+            && cmd.buttons & playerstate_iw4::buttons::JUMP != 0
+            && ps.ground_entity_num == ENTITYNUM_NONE
+            && ps.pm_flags & pm_flags::JUMPING == 0)
+    {
+        ps.pm_flags &=
+            !(pm_flags::LADDER | pm_flags::MANTLE | pm_flags::SPRINTING | pm_flags::JUMPING);
+        ps.ground_entity_num = ENTITYNUM_NONE;
+        // Water drag cancels a long fall without ground impact damage.
+        crate::swim::swim_move(ps, &pml, cmd, bounds, collision);
+        drop_timers(ps, &pml);
+        end_tick_velocity(ps, &pml);
+        return PmoveResult {
+            pml,
+            bounds,
+            stance_event,
+            reset_torso,
+        };
+    }
+
     if (ps.pm_flags & pm_flags::MANTLE) == 0 {
         // Mantle root motion owns the path through the ledge. Ground solid
         // correction during that path would push the player back off it.

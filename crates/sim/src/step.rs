@@ -266,6 +266,7 @@ fn apply_actions_system(world: &mut World) {
 
 fn run_players_system(ecs: &mut World) {
     let tick = ecs.resource::<StepRequest>().tick;
+    let msec = ecs.resource::<StepRequest>().msec;
     let level_time = crate::level_time_ms(tick);
     let input = ecs.resource::<StepRequest>().input.clone();
     let mut world = frame_world(ecs);
@@ -511,7 +512,10 @@ fn run_players_system(ecs: &mut World) {
             if landing_animation {
                 crate::combat::apply_player_anim_event(&mut world, *id, 5);
             }
-            if fall_damage > 0 && world.publishes_snapshot() {
+            if fall_damage > 0
+                && world.publishes_snapshot()
+                && crate::voxel::water_level(moved_to, 60.0) < 2
+            {
                 apply_fall_damage(&mut world, tick, *id, fall_damage, moved_to);
             }
             if let Some(movetype) = anim_movetype {
@@ -588,6 +592,9 @@ fn run_players_system(ecs: &mut World) {
     *world.old_buttons_mut() = original_buttons;
     *world.old_cmd_angles_mut() = original_angles;
     crate::damage::apply_block_world_damage(&mut world, tick);
+    if allow_move && world.publishes_snapshot() {
+        crate::water::advance(&mut world, tick, msec);
+    }
     crate::item::sustain_block_world_arsenal(&mut world);
 
     if world.publishes_snapshot() {
@@ -2112,6 +2119,13 @@ struct ClipBackend<'a> {
 }
 
 impl CollisionBackend for ClipBackend<'_> {
+    fn water_level(&self, origin: [f32; 3], view_height: f32) -> u8 {
+        if crate::voxel::active_for(self.brushes) {
+            crate::voxel::water_level(origin, view_height)
+        } else {
+            0
+        }
+    }
     fn penetrations(
         &self,
         input: GroundTraceInput,

@@ -37,9 +37,66 @@ pub struct VoxelWorld {
     /// Collision boxes of each shape id, in block space `[min, max]`; id 0 is
     /// empty.
     shapes: Vec<Vec<[f32; 6]>>,
+    water: HashMap<u16, u8>,
 }
 
 static WORLD: RwLock<Option<VoxelWorld>> = RwLock::new(None);
+
+#[cfg(test)]
+mod water_tests {
+    use super::*;
+    #[test]
+    fn water_queries_and_spawns_distinguish_air_shallows_and_deep_water() {
+        activate(
+            &[],
+            [0.0, 1.0, 0.0],
+            vec![vec![], vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]],
+        );
+        let source = add_water_shape(vec![], 8).unwrap();
+        let flowing = add_water_shape(vec![], 1).unwrap();
+        let mut ids = vec![0; 4 * 256];
+        for z in 0..16 {
+            for x in 0..16 {
+                ids[z * 16 + x] = 1;
+                if x >= 8 {
+                    for y in 1..4 {
+                        ids[y * 256 + z * 16 + x] = source;
+                    }
+                }
+                if x == 2 {
+                    ids[256 + z * 16 + x] = flowing;
+                }
+            }
+        }
+        set_chunk(
+            0,
+            0,
+            VoxelChunk {
+                min_y: 0,
+                height: 4,
+                shapes: ids,
+            },
+        );
+        let point = |x, y| to_map([0.0, 1.0, 0.0], [x, y, 5.5]);
+        assert_eq!(water_level(point(10.5, 1.01), 60.0), 3);
+        assert_eq!(water_level(point(2.5, 1.01), 60.0), 1);
+        assert_eq!(water_level(point(4.5, 1.01), 60.0), 0);
+        assert!(water_at(point(10.5, 1.99))); // Stacked source fills the whole lower cell.
+        assert!(!water_at(point(10.5, 3.95))); // Air above the free surface.
+        assert!(water_at(point(2.5, 1.05)));
+        assert!(!water_at(point(2.5, 1.2)));
+        let dry = point(4.5, 1.0);
+        let deep = point(10.5, 1.0);
+        let shallow = point(2.5, 1.0);
+        assert!(spawn_at([dry[0], dry[1]]).is_some());
+        assert!(spawn_at([deep[0], deep[1]]).is_none());
+        assert!(spawn_at([shallow[0], shallow[1]]).is_none());
+        // Editing a fluid block out immediately removes its water query.
+        set_block_shape(2, 1, 5, 0);
+        assert!(!water_at(point(2.5, 1.05)));
+        deactivate();
+    }
+}
 /// Bumped whenever the block world's collision changes.
 static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -413,6 +470,7 @@ pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]
             spawn_center: [0.0; 2],
             chunks: HashMap::new(),
             shapes,
+            water: HashMap::new(),
         });
     }
     bump();
@@ -446,6 +504,45 @@ pub fn add_shapes(more: Vec<Vec<[f32; 6]>>) -> Option<u16> {
     let first = world.shapes.len() as u16;
     world.shapes.extend(more);
     Some(first)
+}
+
+/// Fluid shape ids retain water separately from solid collision, including
+/// flowing water and waterlogged blocks. Heights are ninths of a block.
+pub fn add_water_shape(boxes: Vec<[f32; 6]>, amount: u8) -> Option<u16> {
+    let mut guard = WORLD.write().ok()?;
+    let world = guard.as_mut()?;
+    let id = u16::try_from(world.shapes.len()).ok()?;
+    world.shapes.push(boxes);
+    world.water.insert(id, amount.clamp(1, 8));
+    Some(id)
+}
+
+pub fn water_at(point: [f32; 3]) -> bool {
+    WORLD
+        .read()
+        .ok()
+        .and_then(|w| w.as_ref().map(|w| w.water_at(point)))
+        .unwrap_or(false)
+}
+
+/// 0 dry, 1 feet, 2 body, 3 eyes underwater.
+pub fn water_level(origin: [f32; 3], view_height: f32) -> u8 {
+    let Ok(guard) = WORLD.read() else {
+        return 0;
+    };
+    let Some(world) = guard.as_ref() else {
+        return 0;
+    };
+    let wet = |z| world.water_at([origin[0], origin[1], origin[2] + z]);
+    if wet(view_height.max(1.0)) {
+        3
+    } else if wet(view_height.max(1.0) * 0.5) {
+        2
+    } else if wet(1.0) {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn set_chunk(x: i32, z: i32, chunk: VoxelChunk) {
@@ -709,6 +806,14 @@ fn spawn_at(horizontal: [f32; 2]) -> Option<[f32; 3]> {
     surfaces.dedup();
     surfaces.into_iter().find_map(|height| {
         let feet = [horizontal[0], horizontal[1], height];
+        // Reject underwater floors, including shallow water over dry support.
+        if [PLAYER_MINS[0], 0.0, PLAYER_MAXS[0]].into_iter().any(|x| {
+            [PLAYER_MINS[1], 0.0, PLAYER_MAXS[1]].into_iter().any(|y| {
+                water_level([feet[0] + x, feet[1] + y, feet[2]], PLAYER_MAXS[2] - 1.0) != 0
+            })
+        }) {
+            return None;
+        }
         let clear = trace(feet, feet, PLAYER_MINS, PLAYER_MAXS);
         if clear.startsolid != 0 || clear.allsolid != 0 {
             return None;
@@ -753,6 +858,37 @@ pub fn to_map(origin: [f64; 3], b: [f64; 3]) -> [f32; 3] {
 }
 
 impl VoxelWorld {
+    fn shape_id_at(&self, x: i32, y: i32, z: i32) -> u16 {
+        let Some(chunk) = self.chunks.get(&(x >> 4, z >> 4)) else {
+            return 0;
+        };
+        let ly = y - chunk.min_y;
+        if ly < 0 || ly >= chunk.height {
+            return 0;
+        }
+        chunk
+            .shapes
+            .get(((ly * 16 + (z & 15)) * 16 + (x & 15)) as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn water_at(&self, point: [f32; 3]) -> bool {
+        let p = to_block(self.origin, point);
+        let [x, y, z] = p.map(|v| v.floor() as i32);
+        let amount = self
+            .water
+            .get(&self.shape_id_at(x, y, z))
+            .copied()
+            .unwrap_or(0);
+        if amount == 0 {
+            return false;
+        }
+        let above = self.water.contains_key(&self.shape_id_at(x, y + 1, z));
+        let height = if above { 1.0 } else { f64::from(amount) / 9.0 };
+        p[1] - f64::from(y) < height
+    }
+
     fn shape_at(&self, x: i32, y: i32, z: i32) -> &[[f32; 6]] {
         let Some(chunk) = self.chunks.get(&(x >> 4, z >> 4)) else {
             return &[];

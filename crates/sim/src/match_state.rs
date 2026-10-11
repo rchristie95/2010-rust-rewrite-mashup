@@ -84,6 +84,7 @@ impl InputReceipt {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientMatchState {
+    pub(crate) minecraft_air: crate::water::AirSupply,
     pub shield: Option<crate::ShieldAttachment>,
     pub weapon_lock: crate::WeaponLock,
     pub lifecycle: ClientLifecycle,
