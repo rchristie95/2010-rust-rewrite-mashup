@@ -278,12 +278,25 @@ struct MasterTarget {
 fn master_target() -> Result<Option<MasterTarget>> {
     if let Some(community) = updater::selected() {
         return Ok(Some(MasterTarget {
-            address: community.master.address.clone(),
+            address: local_master_address(&community.master.address),
             server_name: community.master.server_name.clone(),
             ca_pem: community.updates.ca_pem.clone(),
         }));
     }
     Ok(None)
+}
+
+fn local_master_address(address: &str) -> String {
+    if cfg!(windows)
+        && let Ok(target) = address.parse::<std::net::SocketAddrV4>()
+        && !target.ip().is_unspecified()
+        && !target.ip().is_multicast()
+        && !target.ip().is_loopback()
+        && std::net::UdpSocket::bind((*target.ip(), 0)).is_ok()
+    {
+        return format!("127.0.0.1:{}", target.port());
+    }
+    address.to_owned()
 }
 
 #[derive(Clone, Debug)]
