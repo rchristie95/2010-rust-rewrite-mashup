@@ -413,10 +413,6 @@ impl Entities {
     }
 
     pub(crate) fn drop_blocks(&mut self, broken: &[((i32, i32, i32), Block, bool, bool)]) {
-        let Some(loot) = self.loot.as_ref() else {
-            return;
-        };
-        let tool = ItemStack::new(LOOT_TOOL, 1);
         for (pos, block, _, drop_items) in broken {
             if !drop_items {
                 continue;
@@ -425,21 +421,34 @@ impl Entities {
                 id: block.id.key(),
                 properties: block.properties.clone(),
             };
-            let Some(drops) = loot.roll_drops_named(
-                &block,
-                Some(&tool),
-                self.seed as u64,
-                &mut self.loot_sequences,
-            ) else {
-                continue;
-            };
-            for mut drop in drops {
-                if drop.components.is_none() {
-                    drop.max = drop.max.min(self.inventory.recipes.max_stack(&drop.id));
-                }
+            for drop in self.drops_for_remote_block(&block) {
                 self.world_items.spawn_block_drop(drop, *pos);
             }
         }
+    }
+
+    pub(crate) fn drops_for_remote_block(
+        &mut self,
+        block: &minecraftoss_player::Block,
+    ) -> Vec<ItemStack> {
+        let Some(loot) = self.loot.as_ref() else {
+            return Vec::new();
+        };
+        let tool = ItemStack::new(LOOT_TOOL, 1);
+        let Some(mut drops) = loot.roll_drops_named(
+            block,
+            Some(&tool),
+            self.seed as u64,
+            &mut self.loot_sequences,
+        ) else {
+            return Vec::new();
+        };
+        for drop in &mut drops {
+            if drop.components.is_none() {
+                drop.max = drop.max.min(self.inventory.recipes.max_stack(&drop.id));
+            }
+        }
+        drops
     }
 
     /// `ItemEntity`s to draw and pick up, as the viewer's
