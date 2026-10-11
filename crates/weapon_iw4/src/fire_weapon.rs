@@ -4,6 +4,7 @@ pub const WEAPTYPE_PROJECTILE: i32 = 2;
 pub const WEAPTYPE_SHIELD: i32 = 3;
 
 pub const WEAPCLASS_GRENADE: i32 = 6;
+pub const WEAPCLASS_SNIPER: i32 = 1;
 pub const WEAPCLASS_SPREAD: i32 = 4;
 pub const WEAPCLASS_TURRET: i32 = 8;
 pub const BULLET_MAX_RANGE: f32 = 8192.0;

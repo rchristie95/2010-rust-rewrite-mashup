@@ -512,6 +512,55 @@ struct FxPresentEnv<'w> {
     staged_models: ResMut<'w, render_fx::FxModelStaging>,
 }
 
+#[derive(SystemParam)]
+struct GunshipProjectileView<'w> {
+    snapshot: Option<Res<'w, net::PresentedSnapshot>>,
+    clock: Option<Res<'w, net::FrameClock>>,
+    weapons: Option<Res<'w, assets::PreparedWeapons>>,
+    tracers: Option<Res<'w, PreparedTracers>>,
+}
+
+impl GunshipProjectileView<'_> {
+    fn queue(&self, tracers: &mut TracerWorld) {
+        let (Some(snapshot), Some(weapons), Some(defs)) = (
+            self.snapshot.as_deref(),
+            self.weapons.as_deref(),
+            self.tracers.as_deref(),
+        ) else {
+            return;
+        };
+        let Ok(bound) = weapons.for_snapshot(snapshot.weapon_epoch()) else {
+            return;
+        };
+        let time = self
+            .clock
+            .as_ref()
+            .filter(|c| c.started())
+            .map(|c| c.time())
+            .unwrap_or_else(|| snapshot.tick().map(sim::level_time_ms).unwrap_or(0));
+        let time = snapshot.trajectory_time_ms(time);
+        for projectile in snapshot.presented_projectiles() {
+            let name = bound.registry().script_name_of(projectile.weapon());
+            if !name.starts_with("ac130_") {
+                continue;
+            }
+            let position = |at| match &projectile {
+                net::PresentedProjectile::Authoritative(p) => snapshot.projectile_origin_at(p, at),
+                _ => projectile.origin_at(at),
+            };
+            let begin = position(time.saturating_sub(35).max(projectile.launch_time()));
+            let end = position(time);
+            let edge = bound
+                .registry()
+                .combat_fx_of(projectile.weapon())
+                .map(|fx| fx.tracer)
+                .unwrap_or(assets::AssetEdge::Absent);
+            let width = if name.contains("105") { 4.0 } else { 2.5 };
+            render_fx::tracer::queue_gunship_projectile(tracers, &defs.0, edge, begin, end, width);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_fx_transaction(
     _main_thread: bevy::ecs::system::NonSendMarker,
@@ -533,6 +582,7 @@ fn generate_fx_transaction(
     xanims: Option<Res<assets::PreparedXAnims>>,
     fpv_bolts: Res<crate::adapters::anim::fpv_present::FpvBoltTargets>,
     remotes: Query<&crate::adapters::anim::remote_body::RemoteFxBolts>,
+    gunship: GunshipProjectileView,
 ) -> FxFrameTransaction {
     let present_span = perf::Span::HostFxPresentCpuMs.enter();
     let Some(catalog) = catalog else {
@@ -589,6 +639,7 @@ fn generate_fx_transaction(
     host.0.vis_blocker_write = vis_write;
     host.0.vis_blocker_read = vis_read;
     tick_tracer_beams(&mut tracers, FxMsec(host.0.msec_now));
+    gunship.queue(&mut tracers);
 
     FxFrameTransaction {
         outcome: FxFrameOutcome::Generated(FxGeneratedFrame {

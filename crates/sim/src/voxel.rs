@@ -655,6 +655,27 @@ pub fn spawn_clear(avoid: &[[f32; 3]]) -> Option<[f32; 3]> {
     best.or_else(|| spawn_existing(spawn_origin()?, avoid))
 }
 
+/// Standable supports for navigation in the loaded Minecraft arena. This is
+/// intentionally sampled from block collision, never the proxy MW2 map.
+pub fn navigation_center() -> Option<[f32; 2]> {
+    Some(WORLD.read().ok()?.as_ref()?.spawn_center)
+}
+
+pub fn navigation_points(center: [f32; 2], radius: i32) -> Vec<[f32; 3]> {
+    let center = center.map(|v| (v / BLOCK).floor() * BLOCK);
+    let mut points = Vec::new();
+    for x in -radius..=radius {
+        for y in -radius..=radius {
+            if let Some(feet) =
+                spawn_at([center[0] + x as f32 * BLOCK, center[1] + y as f32 * BLOCK])
+            {
+                points.push(feet);
+            }
+        }
+    }
+    points
+}
+
 fn spawn_at(horizontal: [f32; 2]) -> Option<[f32; 3]> {
     use crate::bullet_collision::{PLAYER_MAXS, PLAYER_MINS};
     let mut surfaces = {

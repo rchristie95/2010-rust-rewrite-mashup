@@ -27,6 +27,9 @@ const METER_PERIOD_TICKS: u32 = 200;
 struct BotNav {
     graph: NavGraph,
     pending: Option<(u64, Task<NavGraph>, Option<asset_transport::StageHandle>)>,
+    minecraft_center: Option<[f32; 2]>,
+    minecraft_revision: u64,
+    minecraft_refresh: Option<std::time::Instant>,
 }
 
 /// Where the shared quota went and whether pending work actually advanced.
@@ -362,6 +365,67 @@ fn apply_bot_tp(
     }
 }
 
+fn refresh_minecraft_nav(world: &SimWorld, nav: &mut BotNav) {
+    let Some(center) = sim::voxel::navigation_center() else {
+        return;
+    };
+    if nav.minecraft_center.is_none() {
+        nav.pending = None;
+        nav.graph = NavGraph::default();
+    }
+    if let Some((_, task, _)) = nav.pending.as_mut() {
+        if let Some(graph) = future::block_on(future::poll_once(task)) {
+            diag::info!(
+                Sim,
+                "bots: Minecraft navigation {} nodes, {} edges",
+                graph.nodes.len(),
+                graph.adj.iter().map(Vec::len).sum::<usize>()
+            );
+            nav.graph = graph;
+            nav.pending = None;
+        } else {
+            return;
+        }
+    }
+    if !sim::voxel::spawn_area_ready(2) {
+        return;
+    }
+    if nav
+        .minecraft_refresh
+        .is_some_and(|at| at.elapsed().as_secs_f32() < 3.0)
+    {
+        return;
+    }
+    let moved = nav.minecraft_center.is_none_or(|old| {
+        (old[0] - center[0]).abs().max((old[1] - center[1]).abs()) > 8.0 * sim::voxel::BLOCK
+    });
+    if !moved
+        && !sim::voxel::changed_near(
+            nav.minecraft_revision,
+            [center[0], center[1], 0.0],
+            40,
+            2048,
+        )
+    {
+        return;
+    }
+    nav.minecraft_center = Some(center);
+    nav.minecraft_revision = sim::voxel::revision();
+    nav.minecraft_refresh = Some(std::time::Instant::now());
+    let snapshot = world.clone();
+    let digest = world.content_digest() ^ nav.minecraft_revision.rotate_left(32);
+    let generation = nav.graph.generation.wrapping_add(1);
+    nav.pending = Some((
+        digest,
+        assets::load_pool().spawn(async move {
+            let mut graph = nav::bake_minecraft(&snapshot, center, digest);
+            graph.generation = generation;
+            graph
+        }),
+        None,
+    ));
+}
+
 #[derive(SystemParam)]
 struct ThinkBots<'w> {
     clock: Res<'w, AuthorityClock>,
@@ -528,6 +592,13 @@ fn prepare_navigation(
     let Some(world) = world else {
         return;
     };
+    if sim::voxel::active() {
+        refresh_minecraft_nav(&world.0, &mut nav);
+        // Terrain is streamed after map admission. Do not make admission wait
+        // on the navigation graph that depends on that streaming.
+        ready.0.state = frame::ReadinessState::Ready;
+        return;
+    }
     if refresh_nav(&world.0, &mut nav, load.as_deref()) {
         ready.0.state = frame::ReadinessState::Ready;
     }

@@ -291,7 +291,11 @@ pub(crate) fn finish_damage(
     id: ClientId,
     amount: i32,
     dir: Option<[f32; 3]>,
+    commit: Option<DeathCommit>,
 ) -> Finish {
+    // Apply this after the script has accepted the hit, so friendly-fire and
+    // other scripted protections still work. Keep normal death/score feedback.
+    let fatal_headshot = fatal_sniper_headshot(world, amount, commit);
     if god_mode(world, id) {
         return Finish::Hurt;
     }
@@ -304,6 +308,11 @@ pub(crate) fn finish_damage(
     let Some(ps) = world.player_mut(id) else {
         return Finish::Hurt;
     };
+    let amount = if fatal_headshot {
+        amount.max(ps.health)
+    } else {
+        amount
+    };
     movement_iw4::update_damage_timer(ps, amount, dir);
     ps.health = (ps.health - amount.max(0)).max(0);
     ps.damage_count = ps.damage_count.saturating_add(1);
@@ -312,7 +321,10 @@ pub(crate) fn finish_damage(
         return Finish::Hurt;
     }
     use playerstate_iw4::pm_flags::LAST_STAND;
-    if ps.perks[0] & playerstate_iw4::PERK_PISTOLDEATH != 0 && ps.pm_flags & LAST_STAND == 0 {
+    if !fatal_headshot
+        && ps.perks[0] & playerstate_iw4::PERK_PISTOLDEATH != 0
+        && ps.pm_flags & LAST_STAND == 0
+    {
         ps.health = 1;
         ps.pm_type = playerstate_iw4::PM_TYPE_LAST_STAND;
         ps.view_height_target = movement_iw4::view_height::LAST_STAND;
@@ -320,6 +332,114 @@ pub(crate) fn finish_damage(
         return Finish::LastStand;
     }
     Finish::Killed
+}
+
+pub(crate) fn fatal_sniper_headshot(
+    world: &FrameWorld,
+    amount: i32,
+    commit: Option<DeathCommit>,
+) -> bool {
+    amount > 0
+        && commit.is_some_and(|hit| {
+            matches!(hit.source, DamageSource::Shot(_))
+                && hud_iw4::obituary_is_headshot(hit.hitloc)
+                && world
+                    .combat_facts_for(hit.weapon)
+                    .is_some_and(|facts| facts.weap_class == weapon_iw4::WEAPCLASS_SNIPER)
+        })
+}
+
+#[cfg(test)]
+mod sniper_headshot_tests {
+    use super::*;
+
+    fn hit(hitloc: u8) -> DeathCommit {
+        DeathCommit {
+            victim: ClientId(1),
+            victim_life: crate::LifeSequence(1),
+            attacker: ClientId(0),
+            attacker_life: crate::LifeSequence(1),
+            source: DamageSource::Shot(crate::ShotId(1)),
+            pellet: crate::PelletId(0),
+            weapon: 1,
+            amount: 1,
+            hitloc,
+            killcam_entity_start_time: 0,
+            inflictor_origin: None,
+        }
+    }
+
+    fn victim(class: i32) -> crate::SimWorld {
+        let mut world = crate::SimWorld::new();
+        let mut content = crate::SimContentBuilder::default();
+        content.set_weapon_combat_table(vec![
+            weapon_iw4::WeaponCombatFacts::default(),
+            weapon_iw4::WeaponCombatFacts {
+                weap_class: class,
+                damage: 1,
+                ..Default::default()
+            },
+        ]);
+        world.install_content(content.finish());
+        world
+            .bootstrap(crate::MatchBootstrap {
+                allow_debug_actions: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut frame = world.frame();
+        frame.ensure_player(ClientId(1));
+        frame.client_meta_mut(ClientId(1)).lifecycle = ClientLifecycle::Alive;
+        let ps = frame.player_mut(ClientId(1)).unwrap();
+        ps.health = 500;
+        ps.perks[0] |= playerstate_iw4::PERK_PISTOLDEATH;
+        world
+    }
+
+    #[test]
+    fn one_damage_sniper_headshot_kills_high_health_without_last_stand() {
+        for hitloc in [1, 2] {
+            let mut world = victim(weapon_iw4::WEAPCLASS_SNIPER);
+            let mut frame = world.frame();
+            assert_eq!(
+                finish_damage(&mut frame, ClientId(1), 1, None, Some(hit(hitloc))),
+                Finish::Killed
+            );
+            let ps = frame.player(ClientId(1)).unwrap();
+            assert_eq!(ps.health, 0);
+            assert_eq!(ps.pm_flags & playerstate_iw4::pm_flags::LAST_STAND, 0);
+        }
+    }
+
+    #[test]
+    fn body_and_other_weapon_headshots_keep_normal_damage() {
+        for (class, hitloc) in [(weapon_iw4::WEAPCLASS_SNIPER, 4), (0, 2)] {
+            let mut world = victim(class);
+            let mut frame = world.frame();
+            assert_eq!(
+                finish_damage(&mut frame, ClientId(1), 1, None, Some(hit(hitloc))),
+                Finish::Hurt
+            );
+            assert_eq!(frame.player(ClientId(1)).unwrap().health, 499);
+        }
+    }
+
+    #[test]
+    fn refused_zero_damage_and_god_mode_are_preserved() {
+        let mut world = victim(weapon_iw4::WEAPCLASS_SNIPER);
+        let mut frame = world.frame();
+        assert_eq!(
+            finish_damage(&mut frame, ClientId(1), 0, None, Some(hit(2))),
+            Finish::Hurt
+        );
+        assert_eq!(frame.player(ClientId(1)).unwrap().health, 500);
+        frame.client_meta_mut(ClientId(1)).god_mode = true;
+        assert_eq!(
+            finish_damage(&mut frame, ClientId(1), 1, None, Some(hit(2))),
+            Finish::Hurt
+        );
+        assert_eq!(frame.player(ClientId(1)).unwrap().health, 500);
+    }
 }
 
 pub(crate) fn revive(world: &mut FrameWorld, id: ClientId) {

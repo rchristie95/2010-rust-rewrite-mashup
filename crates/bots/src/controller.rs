@@ -130,7 +130,7 @@ impl HostController {
     pub fn stuck(&self, tick: u32) -> bool {
         matches!(
             self.intent.move_mode,
-            MoveMode::Walk | MoveMode::Drop | MoveMode::BreakGlass
+            MoveMode::Walk | MoveMode::Drop | MoveMode::Jump | MoveMode::BreakGlass
         ) && tick.saturating_sub(self.progress_tick) >= STUCK_TICKS
     }
 
@@ -519,7 +519,7 @@ impl HostController {
         }
         let moving = matches!(
             self.intent.move_mode,
-            MoveMode::Walk | MoveMode::Drop | MoveMode::BreakGlass
+            MoveMode::Walk | MoveMode::Drop | MoveMode::Jump | MoveMode::BreakGlass
         ) || self.intent.path == PathOutcome::Blocked;
         if !moving || obs.tick.saturating_sub(self.progress_tick) < 40 {
             return None;
@@ -1248,14 +1248,18 @@ impl HostController {
         let Some(step) = self.committed.first().copied() else {
             return (MoveMode::Hold, PathOutcome::Clear, Some(from));
         };
-        let sample = if step.kind == nav::TraversalKind::Drop {
+        let sample = if step.kind == nav::TraversalKind::Jump {
+            nav::jump_clear(world, from, step.position)
+        } else if step.kind == nav::TraversalKind::Drop {
             nav::drop_clear(world, from, step.position)
         } else {
             world.walk_hull(from, step.position)
         };
         match sample {
             Ok(WalkSample::Clear) => (
-                if step.kind == nav::TraversalKind::Drop {
+                if step.kind == nav::TraversalKind::Jump {
+                    MoveMode::Jump
+                } else if step.kind == nav::TraversalKind::Drop {
                     MoveMode::Drop
                 } else {
                     MoveMode::Walk

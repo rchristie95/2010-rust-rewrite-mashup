@@ -113,8 +113,10 @@ impl Motor {
             self.last_look = None;
         }
         let unsupported = matches!(intent.move_mode, MoveMode::Mantle | MoveMode::Ladder);
-        let walking = matches!(intent.move_mode, MoveMode::Walk | MoveMode::Drop)
-            && matches!(intent.path, PathOutcome::Clear | PathOutcome::ProgressLost);
+        let walking = matches!(
+            intent.move_mode,
+            MoveMode::Walk | MoveMode::Drop | MoveMode::Jump
+        ) && matches!(intent.path, PathOutcome::Clear | PathOutcome::ProgressLost);
         let (mut forwardmove, mut rightmove) = (0i8, 0i8);
         if !unsupported
             && walking
@@ -167,6 +169,13 @@ impl Motor {
         }
         if intent.crouch {
             cmd.buttons |= buttons::CROUCH;
+        }
+        if intent.move_mode == MoveMode::Jump
+            && intent
+                .move_goal
+                .is_some_and(|to| to[2] - obs.self_state.origin[2] > crate::nav::STEP_Z_IN)
+        {
+            cmd.buttons |= buttons::JUMP;
         }
         cmd
     }

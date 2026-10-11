@@ -67,6 +67,10 @@ pub(crate) fn register_weapon_commands(
     registry: &mut ConsoleRegistry,
     completions: &WeaponArgCompletions,
 ) {
+    registry.register(
+        crate::CommandSpec::new("use")
+            .usage("use killstreak/<name> — activate an earned killstreak"),
+    );
     if registry.resolve("give").is_none() {
         registry.register(
             crate::CommandSpec::new("give")
@@ -173,6 +177,48 @@ pub(crate) fn route_weapon_commands(
             continue;
         }
         match cmd.name.as_str() {
+            "use" => {
+                let name = cmd
+                    .args
+                    .first()
+                    .and_then(|arg| arg.strip_prefix("killstreak/"));
+                let rewards = presented
+                    .snapshot()
+                    .and_then(|snapshot| snapshot.meta.for_client(local.0))
+                    .and_then(|meta| {
+                        meta.client_dvars
+                            .iter()
+                            .find(|(key, _)| key == sim::script::killstreaks::REWARDS_DVAR)
+                    });
+                let index = name.and_then(|name| {
+                    rewards.and_then(|(_, value)| value.split('|').position(|owned| owned == name))
+                });
+                if let (Some(name), Some(index)) = (name, index)
+                    && let (Some(menu), Some(response)) = (
+                        sim::menu_response_field(sim::script::killstreaks::USE_MENU),
+                        sim::menu_response_field(&format!("{index}:{name}")),
+                    )
+                {
+                    let request_id = seq.allocate();
+                    match inbox.push(
+                        local.0,
+                        ClientAction::MenuResponse {
+                            request_id,
+                            menu,
+                            response,
+                        },
+                    ) {
+                        Ok(()) => echo(format!("use: queued {name}"), &mut console, &mut line),
+                        Err(error) => echo(format!("use: {error}"), &mut console, &mut line),
+                    }
+                } else {
+                    echo(
+                        "use: specify an earned killstreak/<name>".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                }
+            }
             "give" => {
                 let target = match parse_give_target(&cmd.args) {
                     Ok(target) => target,

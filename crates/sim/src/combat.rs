@@ -1330,6 +1330,14 @@ pub(crate) fn phase_trace(
                 // its multiplier for where on the body it struck.
                 let scale = facts.location_scale(crate::voxel::mob_hitloc(up));
                 let damage = bullet_damage_at_distance(&facts, dist).max(0) as f32 * scale;
+                let damage = if damage > 0.0
+                    && facts.weap_class == weapon_iw4::WEAPCLASS_SNIPER
+                    && hud_iw4::obituary_is_headshot(crate::voxel::mob_hitloc(up))
+                {
+                    i32::MAX as f32
+                } else {
+                    damage
+                };
                 crate::voxel::push_mob_shot(
                     key,
                     damage,

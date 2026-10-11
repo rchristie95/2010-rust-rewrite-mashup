@@ -14,6 +14,7 @@ pub enum MoveMode {
     Hold,
     Walk,
     Drop,
+    Jump,
     BreakGlass,
     Mantle,
     Ladder,

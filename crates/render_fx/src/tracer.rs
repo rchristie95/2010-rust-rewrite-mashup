@@ -235,3 +235,68 @@ pub fn tick_tracer_beams(world: &mut TracerWorld, clock: FxMsec) {
         });
     }
 }
+
+/// Gunship shells often have no drawable projectile model/tag_fx. Present the
+/// actual replicated trajectory directly rather than losing the whole trail.
+pub fn queue_gunship_projectile(
+    world: &mut TracerWorld,
+    catalog: &TracerDefinitions,
+    tracer: AssetEdge<TracerSpace>,
+    begin: [f32; 3],
+    end: [f32; 3],
+    width: f32,
+) {
+    let Some(def) = gunship_tracer(catalog, tracer) else {
+        return;
+    };
+    if math_iw4::vec3_length(std::array::from_fn(|i| end[i] - begin[i])) < 0.5
+        || world.queued.len() >= FX_BEAM_ADD_CAP
+    {
+        return;
+    }
+    world.queued.push(QueuedBeam {
+        tess: FxBeamTess {
+            begin,
+            end,
+            begin_radius: width,
+            end_radius: width,
+            colors: [[1.0, 0.85, 0.45, 1.0]; 5],
+            segment_count: 1,
+            wiggle_dist: 0.0,
+        },
+        material: def.material.bound_index(),
+    });
+}
+
+fn gunship_tracer(
+    catalog: &TracerDefinitions,
+    tracer: AssetEdge<TracerSpace>,
+) -> Option<&OwnedTracerDef> {
+    tracer
+        .bound_index()
+        .and_then(|index| catalog.def_at(index))
+        .filter(|def| def.material.is_bound())
+        .or_else(|| {
+            catalog
+                .defs()
+                .filter(|def| def.material.is_bound())
+                .min_by_key(|def| !def.name.to_ascii_lowercase().contains("ac130"))
+        })
+}
+
+pub fn spawn_gunship_bullet(
+    world: &mut TracerWorld,
+    catalog: &TracerDefinitions,
+    tracer: AssetEdge<TracerSpace>,
+    start: [f32; 3],
+    end: [f32; 3],
+    clock: FxMsec,
+) -> Result<(), TracerSpawnSkip> {
+    let mut def = gunship_tracer(catalog, tracer)
+        .ok_or(TracerSpawnSkip::NoDef)?
+        .clone();
+    def.beam_width = def.beam_width.max(2.0);
+    def.beam_length = def.beam_length.max(128.0);
+    def.colors = [[1.0, 0.85, 0.45, 1.0]; 5];
+    spawn_moving_tracer(world, &def, start, end, false, clock).map_err(|_| TracerSpawnSkip::Short)
+}

@@ -37,6 +37,7 @@ pub(crate) fn route_class_commands(
     mut seq: ResMut<net::ActionRequestIds>,
     change_allowed: Res<ClassChangeAllowed>,
     block_reason: Res<ClassChangeBlockReason>,
+    signon: Option<Res<SignonState>>,
 ) {
     let capacity = settings.log_capacity;
     let echo = |msg: String, console: &mut ConsoleState, line: &mut ConsoleLine| {
@@ -90,7 +91,10 @@ pub(crate) fn route_class_commands(
                     );
                     continue;
                 }
-                match spawn_gate(change_allowed.0, cmd.background) {
+                match spawn_gate(
+                    change_allowed.0 && signon.as_ref().is_none_or(|s| s.may_select_class()),
+                    cmd.background,
+                ) {
                     SpawnGate::RefuseNow => {
                         let reason = block_reason
                             .0
@@ -164,7 +168,7 @@ pub(crate) fn complete_pending_spawn(
         console.echo(msg, capacity);
         return;
     }
-    if !change_allowed.0 {
+    if !change_allowed.0 || signon.as_ref().is_some_and(|s| !s.may_select_class()) {
         return;
     }
     let class = dispatch.pending_spawn_class.take();

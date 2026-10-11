@@ -639,12 +639,6 @@ fn register_death(registry: &mut NativeRegistry) {
     registry.register(Method, "finishplayerdamage", |world, receiver, args| {
         let client = player(world, receiver)?;
         let now = super::super::players::now_ms(world);
-        if slot(world, client)?
-            .last_stand_until_ms
-            .is_some_and(|until| now < until)
-        {
-            return Ok(Value::Undefined);
-        }
         let id = ClientId(client);
         let attacker = maybe_player(world, args, 1);
         let inflictor_entity = super::super::players::damage_entity(world, args.first());
@@ -666,6 +660,15 @@ fn register_death(registry: &mut NativeRegistry) {
             .as_ref()
             .filter(|hit| hit.victim == id)
             .and_then(|hit| hit.commit);
+        let fatal_headshot =
+            script_player::fatal_sniper_headshot(&FrameWorld::from_world(world), amount, commit);
+        if !fatal_headshot
+            && slot(world, client)?
+                .last_stand_until_ms
+                .is_some_and(|until| now < until)
+        {
+            return Ok(Value::Undefined);
+        }
         let tick = tick(world);
         let owed = || -> Vec<Value> {
             let at = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
@@ -683,7 +686,7 @@ fn register_death(registry: &mut NativeRegistry) {
         };
         let finish = {
             let mut frame = FrameWorld::from_world(world);
-            let finish = script_player::finish_damage(&mut frame, id, amount, dir);
+            let finish = script_player::finish_damage(&mut frame, id, amount, dir, commit);
             if finish == script_player::Finish::Killed {
                 script_player::kill(&mut frame, tick, id, attacker, commit);
             }

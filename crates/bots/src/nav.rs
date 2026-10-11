@@ -37,6 +37,7 @@ pub enum TraversalKind {
     Walk,
     Drop,
     BreakGlass,
+    Jump,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +80,7 @@ impl TraversalKind {
             Self::Walk => 0,
             Self::Drop => 1,
             Self::BreakGlass => 2,
+            Self::Jump => 3,
         }
     }
 
@@ -87,6 +89,7 @@ impl TraversalKind {
             0 => Some(Self::Walk),
             1 => Some(Self::Drop),
             2 => Some(Self::BreakGlass),
+            3 => Some(Self::Jump),
             _ => None,
         }
     }
@@ -667,6 +670,95 @@ fn dist_xy(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
     (dx * dx + dy * dy).sqrt()
+}
+
+/// Minecraft changes at runtime and has no authored MW2 navigation cache.
+/// Build a bounded arena graph from clear standing hulls on the actual blocks.
+pub fn bake_minecraft(world: &impl BakeTraces, center: [f32; 2], digest: u64) -> NavGraph {
+    let nodes = sim::voxel::navigation_points(center, 40);
+    let step = sim::voxel::BLOCK;
+    let buckets = node_buckets(&nodes, step);
+    let mut adj = par_map(nodes.len(), |i| {
+        let mut probe = Baker(world);
+        let a = nodes[i];
+        let mut edges = Vec::new();
+        for j in neighbors(&buckets, a, step) {
+            let b = nodes[j];
+            let planar = dist_xy(a, b);
+            if i == j || planar > step * 1.5 || planar < 1.0 {
+                continue;
+            }
+            let kind = if supported_walk(&mut probe, a, b) == Ok(WalkSample::Clear) {
+                TraversalKind::Walk
+            } else if b[2] - a[2] > STEP_Z_IN
+                && b[2] - a[2] <= step + 1.0
+                && jump_clear(&mut probe, a, b) == Ok(WalkSample::Clear)
+            {
+                TraversalKind::Jump
+            } else {
+                continue;
+            };
+            edges.push(NavEdge {
+                to: j as u16,
+                cost: planar + (a[2] - b[2]).abs(),
+                kind,
+            });
+        }
+        edges
+    });
+    let component = label_components(nodes.len(), &adj);
+    let drops = link_drops(world, &nodes, &mut adj, &buckets, step);
+    let mut component_links = vec![
+        Vec::new();
+        component
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |c| c as usize + 1)
+    ];
+    for (i, edges) in adj.iter().enumerate() {
+        for edge in edges {
+            let a = component[i];
+            let b = component[edge.to as usize];
+            if a != b && !component_links[a as usize].contains(&b) {
+                component_links[a as usize].push(b);
+            }
+        }
+    }
+    NavGraph {
+        digest,
+        schema: NAV_SCHEMA,
+        hull: NAV_HULL,
+        nodes,
+        adj,
+        component,
+        component_links,
+        drops,
+        ..NavGraph::default()
+    }
+}
+
+/// One-block jump: prove headroom, the raised approach and a clear landing.
+pub fn jump_clear(
+    world: &mut impl WorldQuery,
+    from: [f32; 3],
+    to: [f32; 3],
+) -> QueryResult<WalkSample> {
+    if to[2] - from[2] <= STEP_Z_IN {
+        return world.walk_hull(from, to);
+    }
+    if to[2] - from[2] > sim::voxel::BLOCK + 1.0 || dist_xy(from, to) > 80.0 {
+        return Ok(WalkSample::Blocked);
+    }
+    let up = [from[0], from[1], from[2] + 39.0];
+    let over = [to[0], to[1], up[2]];
+    for (a, b) in [(from, up), (up, over), (over, [to[0], to[1], to[2] + 0.25])] {
+        let trace = world.hull_trace(a, b)?;
+        if trace.startsolid || trace.fraction < 1.0 {
+            return Ok(WalkSample::Blocked);
+        }
+    }
+    Ok(WalkSample::Clear)
 }
 
 fn link_drops(

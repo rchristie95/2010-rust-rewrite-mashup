@@ -196,6 +196,8 @@ pub fn play_pellet_segment(
         .map(|fx| fx.tracer)
         .unwrap_or(assets::AssetEdge::Absent);
     let own_shot = attacker_entity_num == local_number;
+    let gunship =
+        weapons.is_some_and(|w| w.registry().script_name_of(weapon).starts_with("ac130_"));
     let source_id = attacker_entity_num.max(0) as u32;
 
     let tag_start = gate
@@ -213,8 +215,22 @@ pub fn play_pellet_segment(
         })
         .flatten()
         .map(|target| target.orientation.origin);
-    let start = tag_start.unwrap_or(seg_start);
+    let start = if gunship {
+        seg_start
+    } else {
+        tag_start.unwrap_or(seg_start)
+    };
     match tracers.map(|t| {
+        if gunship {
+            return crate::tracer::spawn_gunship_bullet(
+                tracer_world,
+                &t.0,
+                tracer_edge,
+                start,
+                seg_end,
+                FxMsec::from_host(&host.0),
+            );
+        }
         try_spawn_tracer(
             gate,
             tracer_world,

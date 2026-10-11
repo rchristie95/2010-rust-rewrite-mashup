@@ -24,6 +24,15 @@ pub fn apply_pending_class_equip(
     local: Res<LocalPresentClient>,
     signon: Option<Res<net::SignonState>>,
 ) {
+    // Admission can change between the command/UI choosing a class and this
+    // system applying it. Keep the transaction queued through that transition.
+    if signon.as_ref().is_some_and(|signon| {
+        !signon.may_select_class()
+            && !signon.phase.is_failed()
+            && !matches!(signon.phase, net::SignonPhase::Cancelled)
+    }) {
+        return;
+    }
     let Some(req) = pending.0.take() else {
         return;
     };
