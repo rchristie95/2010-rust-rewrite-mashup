@@ -114,9 +114,18 @@ struct Runtime {
     changed_blocks: HashSet<(i32, i32, i32)>,
     edit_revision: u64,
     network_log: Vec<(u64, Vec<([i32; 3], u32)>)>,
+    network_initial_revision: u64,
+    network_initial_positions: HashSet<(i32, i32, i32)>,
+    remote_stock: HashMap<sim::ClientId, HashMap<u16, u16>>,
+    stock_dirty: HashSet<sim::ClientId>,
+    pending_stock: Option<Vec<(u16, u16)>>,
+    remote_mining_owner: HashMap<(i32, i32, i32), sim::ClientId>,
     live_progress: HashMap<sim::ClientId, (usize, usize)>,
     sent_init: HashSet<sim::ClientId>,
     init_progress: HashMap<sim::ClientId, PeerInit>,
+    mob_sequence: u32,
+    mob_parts: Option<(u32, u8, Vec<Option<Vec<net::MinecraftMobVisual>>>)>,
+    last_mobs_sent: f64,
     day: DayCycle,
     environment_accumulator: f64,
     environment_primed: bool,
@@ -392,7 +401,11 @@ fn update(
     authority: Option<ResMut<net::AuthorityWorld>>,
     prediction: Option<Res<net::ClientPredictionState>>,
     role: Res<frame::RuntimeRole>,
-    mut minecraft_sync: ResMut<net::MinecraftSync>,
+    (mut minecraft_sync, mut action_inbox, mut request_ids): (
+        ResMut<net::MinecraftSync>,
+        ResMut<net::ClientActionInbox>,
+        ResMut<net::ActionRequestIds>,
+    ),
     hub: Option<Res<net::UdpAuthorityHub>>,
     mut reliable: ResMut<net::ReliableEventHub>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -419,11 +432,16 @@ fn update(
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
         ui.minimap = None;
+        minecraft_sync.accept_intents = false;
+        minecraft_sync.incoming_intents.clear();
     }
-    ui.loading_world = runtime.loading.is_some();
+    ui.loading_world = runtime.loading.is_some()
+        || (*role == frame::RuntimeRole::Client && view.active && runtime.world.is_none());
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
         ui.minimap = None;
+        minecraft_sync.accept_intents = false;
+        minecraft_sync.incoming_intents.clear();
         if assets::minecraft_map::is_minecraft(&match_.zone) {
             if *role != frame::RuntimeRole::Client {
                 let seed = seed();
@@ -437,21 +455,75 @@ fn update(
     }
     for message in std::mem::take(&mut minecraft_sync.incoming) {
         match message {
-            net::MinecraftMessage::Begin { seed, origin, edits, .. }
-                if *role == frame::RuntimeRole::Client && view.active =>
-            {
+            net::MinecraftMessage::Begin {
+                seed,
+                origin,
+                revision,
+                edits,
+            } if *role == frame::RuntimeRole::Client && view.active => {
                 runtime.network_seed = Some(seed);
                 runtime.network_origin = Some(origin);
                 runtime.network_edits_expected = Some(edits);
+                runtime.network_initial_revision = revision;
+                runtime.network_initial_positions.clear();
                 runtime.network_edits.clear();
             }
-            net::MinecraftMessage::Blocks { changes, .. }
+            net::MinecraftMessage::Blocks { revision, changes }
                 if *role == frame::RuntimeRole::Client && view.active =>
             {
                 for (pos, block) in changes {
-                    runtime.network_edits.insert((pos[0], pos[1], pos[2]), block);
+                    if revision == runtime.network_initial_revision {
+                        runtime
+                            .network_initial_positions
+                            .insert((pos[0], pos[1], pos[2]));
+                    }
+                    runtime
+                        .network_edits
+                        .insert((pos[0], pos[1], pos[2]), block);
                     runtime.changed_blocks.insert((pos[0], pos[1], pos[2]));
                 }
+            }
+            net::MinecraftMessage::Mobs {
+                sequence,
+                part,
+                total,
+                mobs,
+            } if *role == frame::RuntimeRole::Client && view.active => {
+                if sequence > runtime.mob_sequence
+                    && runtime
+                        .mob_parts
+                        .as_ref()
+                        .is_none_or(|(current, _, _)| sequence > *current)
+                {
+                    runtime.mob_parts = Some((sequence, total, vec![None; usize::from(total)]));
+                }
+                let mut complete = None;
+                if let Some((current, count, parts)) = runtime.mob_parts.as_mut()
+                    && *current == sequence
+                    && *count == total
+                {
+                    parts[usize::from(part)] = Some(mobs);
+                    if parts.iter().all(Option::is_some) {
+                        complete = Some(
+                            parts
+                                .iter()
+                                .flat_map(|part| part.as_ref().unwrap().iter().copied())
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+                if let Some(snapshot) = complete {
+                    if let Some(entities) = runtime.entities.as_mut() {
+                        entities.apply_network_snapshot(&snapshot);
+                    }
+                    runtime.mob_parts = None;
+                    runtime.mob_sequence = sequence;
+                }
+            }
+            net::MinecraftMessage::Stock { entries }
+                if *role == frame::RuntimeRole::Client && view.active =>
+            {
+                runtime.pending_stock = Some(entries);
             }
             _ => {}
         }
@@ -459,7 +531,9 @@ fn update(
     if *role == frame::RuntimeRole::Client
         && runtime.world.is_none()
         && runtime.loading.is_none()
-        && runtime.network_edits_expected.is_some_and(|count| runtime.network_edits.len() >= count as usize)
+        && runtime
+            .network_edits_expected
+            .is_some_and(|count| runtime.network_initial_positions.len() >= count as usize)
         && let Some(seed) = runtime.network_seed
     {
         runtime.loading = Some(start_load(seed));
@@ -480,10 +554,11 @@ fn update(
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
                 runtime.sounds = Some(crate::minecraft_sounds::Sounds::load(&world.packs));
-                runtime.entities = Some(crate::minecraft_entities::Entities::new(
-                    &world.stream,
-                    world.seed,
-                ));
+                runtime.entities = Some(if *role == frame::RuntimeRole::Client {
+                    crate::minecraft_entities::Entities::new_remote(world.seed)
+                } else {
+                    crate::minecraft_entities::Entities::new(&world.stream, world.seed)
+                });
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -539,9 +614,15 @@ fn update(
         changed_blocks,
         edit_revision,
         network_log,
+        remote_stock,
+        stock_dirty,
+        pending_stock,
+        remote_mining_owner,
         live_progress,
         sent_init,
         init_progress,
+        mob_sequence,
+        last_mobs_sent,
         shapes,
         shape_ids,
         was_alive,
@@ -563,17 +644,52 @@ fn update(
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
+        minecraft_sync.incoming_intents.clear();
         ui.active = false;
         ui.inventory_open = false;
         puppet.active = false;
         return;
     };
+    minecraft_sync.accept_intents = authority.is_some();
+    if let Some(entities) = entities.as_mut() {
+        if let Some(entries) = pending_stock.take() {
+            for slot in &mut entities.inventory.slots {
+                if slot
+                    .as_ref()
+                    .is_some_and(|item| crate::minecraft_inventory::weapon_of(item).is_none())
+                {
+                    *slot = None;
+                }
+            }
+            for (state, count) in entries {
+                if let Some(block) = world.stream.states.block(BlockStateId(state)) {
+                    let mut left = count;
+                    while left > 0 {
+                        let chunk = left.min(64) as u8;
+                        let item =
+                            minecraftoss_player::inventory::ItemStack::new(block.id.key(), chunk);
+                        let _ = entities.inventory.add_item(item, entities.selected);
+                        left -= u16::from(chunk);
+                    }
+                }
+            }
+        }
+    }
     if *role == frame::RuntimeRole::Client && !changed_blocks.is_empty() {
         let positions: Vec<_> = changed_blocks.drain().collect();
         for pos in &positions {
             let state = network_edits[pos];
+            if state as usize >= world.registries.blocks.state_count() {
+                diag::warn!(
+                    World,
+                    "Minecraft sync: rejected unknown block state {state}"
+                );
+                continue;
+            }
             let state = BlockStateId(state as u16);
-            world.scene.set(*pos, world.stream.states.block(state).cloned());
+            world
+                .scene
+                .set(*pos, world.stream.states.block(state).cloned());
             let shape = block_shape(&world.registries.blocks, state, shapes, shape_ids);
             sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
         }
@@ -655,6 +771,34 @@ fn update(
             .unwrap_or(block)
     };
     let (loaded, forgotten) = world.stream.server_tick(stream_block, &mut world.scene);
+    if let Some(authority) = authority.as_mut() {
+        for (id, _) in authority.0.clients_scoreboard() {
+            if id == local.0 {
+                continue;
+            }
+            let Some(remote) = authority.0.player(id) else {
+                continue;
+            };
+            let remote_feet = sim::voxel::to_block(origin, remote.origin);
+            let peer_chunk = (
+                remote_feet[0].floor() as i32 >> 4,
+                remote_feet[2].floor() as i32 >> 4,
+            );
+            let center_chunk = (stream_block.0 >> 4, stream_block.2 >> 4);
+            if (peer_chunk.0 - center_chunk.0).abs() > 5
+                || (peer_chunk.1 - center_chunk.1).abs() > 5
+            {
+                let safe = [ps.origin[0] + 64.0, ps.origin[1], ps.origin[2]];
+                if authority.0.teleport(id, safe) {
+                    diag::warn!(
+                        World,
+                        "Minecraft player {} returned to the shared loaded area",
+                        id.0
+                    );
+                }
+            }
+        }
+    }
     for chunk in loaded {
         let blocks = &world.registries.blocks;
         let (min_y, height) = (chunk.min_y(), chunk.height());
@@ -734,7 +878,9 @@ fn update(
     if alive
         && !*was_alive
         && let Some(at) = spawn_at
-        && authority.as_mut().is_some_and(|authority| authority.0.teleport(local.0, at))
+        && authority
+            .as_mut()
+            .is_some_and(|authority| authority.0.teleport(local.0, at))
     {
         diag::info!(
             World,
@@ -748,6 +894,135 @@ fn update(
     let yaw_rad = ps.viewangles[1].to_radians();
     let mc_yaw = (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees();
     let mut all_events = sim::voxel::take_events();
+    if let Some(authority) = authority.as_ref() {
+        let mut handled = HashMap::<sim::ClientId, u8>::new();
+        for (client, kind, position, state) in std::mem::take(&mut minecraft_sync.incoming_intents)
+        {
+            let count = handled.entry(client).or_default();
+            if *count >= 4 {
+                continue;
+            }
+            *count += 1;
+            let Some(remote) = authority.0.player(client).filter(|p| p.pm_type == 0) else {
+                continue;
+            };
+            let remote_feet = sim::voxel::to_block(origin, remote.origin);
+            let delta = glam::DVec3::new(
+                f64::from(position[0]) + 0.5 - remote_feet[0],
+                f64::from(position[1]) + 0.5 - remote_feet[1],
+                f64::from(position[2]) + 0.5 - remote_feet[2],
+            );
+            if kind != 2 && delta.length() > 6.0 {
+                continue;
+            }
+            let yaw_rad = remote.viewangles[1].to_radians();
+            let remote_yaw = (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees();
+            let mut actor = minecraftoss_player::Player::new(glam::DVec3::from_array(remote_feet));
+            actor.yaw = f64::from(remote_yaw);
+            actor.pitch = f64::from(remote.viewangles[0]);
+            let pos = (position[0], position[1], position[2]);
+            match kind {
+                2 => {
+                    if let (Some(entities), Some(meta)) =
+                        (entities.as_mut(), authority.0.client_meta(client))
+                    {
+                        let yaw = f64::from(remote_yaw).to_radians();
+                        let pitch = f64::from(remote.viewangles[0]).to_radians();
+                        let eye = glam::DVec3::from_array(remote_feet) + glam::DVec3::Y * 1.62;
+                        let look = glam::DVec3::new(
+                            -yaw.sin() * pitch.cos(),
+                            -pitch.sin(),
+                            yaw.cos() * pitch.cos(),
+                        );
+                        entities.remote_punch(
+                            u64::from(client.0) + 1,
+                            eye,
+                            look,
+                            remote_yaw,
+                            sim::voxel::MobAttackCredit {
+                                client,
+                                life: meta.life_sequence,
+                            },
+                        );
+                    }
+                }
+                0 if actor
+                    .target(&world.scene, 4.5)
+                    .is_some_and(|hit| hit.pos == pos) =>
+                {
+                    remote_mining_owner.insert(pos, client);
+                    all_events.push(sim::voxel::VoxelEvent::Shot {
+                        block: position,
+                        damage: 160.0 / 30.0,
+                        drop_items: true,
+                    });
+                }
+                1 if state != BlockStateId::AIR.0
+                    && (state as usize) < world.registries.blocks.state_count() =>
+                {
+                    let Some(stock) = remote_stock.get_mut(&client) else {
+                        continue;
+                    };
+                    let Some(available) = stock.get_mut(&state).filter(|count| **count > 0) else {
+                        continue;
+                    };
+                    let Some(block) = world.stream.states.block(BlockStateId(state)).cloned()
+                    else {
+                        continue;
+                    };
+                    let old = minecraft_terrain::scene::Scene::block(&world.scene, pos).cloned();
+                    let block = minecraftoss_player::Block {
+                        id: block.id.key(),
+                        properties: block.properties,
+                    };
+                    if let Some(placed) = actor.place_target_with(&mut world.scene, block) {
+                        if placed != pos {
+                            world.scene.set(placed, None);
+                            continue;
+                        }
+                        let [fx, fy, fz] = remote_feet;
+                        let inside = (fx - 0.3) < f64::from(pos.0 + 1)
+                            && (fx + 0.3) > f64::from(pos.0)
+                            && fy < f64::from(pos.1 + 1)
+                            && (fy + 1.8) > f64::from(pos.1)
+                            && (fz - 0.3) < f64::from(pos.2 + 1)
+                            && (fz + 0.3) > f64::from(pos.2);
+                        if inside {
+                            world.scene.set(pos, old);
+                            continue;
+                        }
+                        let placed_block =
+                            minecraft_terrain::scene::Scene::block(&world.scene, pos);
+                        let placed_state =
+                            placed_block.and_then(|b| world.stream.states.state_of(b));
+                        let shape = placed_state.map_or(0, |id| {
+                            let boxes = world.registries.blocks.collision_boxes(id);
+                            if boxes.is_empty() {
+                                0
+                            } else {
+                                sim::voxel::add_shapes(vec![
+                                    boxes.iter().map(|b| b.map(|v| v as f32)).collect(),
+                                ])
+                                .unwrap_or(0)
+                            }
+                        });
+                        sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
+                        world.stream.record_edits(&world.scene, &[pos]);
+                        world.stream.mark_edited(&world.scene, &[pos]);
+                        changed_blocks.insert(pos);
+                        *available -= 1;
+                        if *available == 0 {
+                            stock.remove(&state);
+                        }
+                        stock_dirty.insert(client);
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        minecraft_sync.incoming_intents.clear();
+    }
 
     // The hand, when no gun is selected: vanilla's left click mines by hand
     // (with the hand's break speed) or punches, its right click places the
@@ -878,7 +1153,10 @@ fn update(
             || pad_trigger(pad, GamepadButton::RightTrigger2, true)
         {
             hand.swing = Some(0.0);
-            if let Some(meta) = authority.as_ref().and_then(|authority| authority.0.client_meta(local.0)) {
+            if let Some(meta) = authority
+                .as_ref()
+                .and_then(|authority| authority.0.client_meta(local.0))
+            {
                 entities.punch(
                     eye_block,
                     look,
@@ -888,20 +1166,42 @@ fn update(
                         life: meta.life_sequence,
                     },
                 );
+            } else if authority.is_none() {
+                let _ = action_inbox.push(
+                    local.0,
+                    sim::ClientAction::MinecraftInteract {
+                        request_id: request_ids.allocate(),
+                        kind: 2,
+                        position: [0; 3],
+                        state: 0,
+                    },
+                );
             }
         }
-        if authority.is_some() && (buttons.pressed(MouseButton::Left)
+        if buttons.pressed(MouseButton::Left)
             || pad_trigger(pad, GamepadButton::RightTrigger2, false)
-        ) {
+        {
             for _ in 0..hand_ticks {
                 if let Some(hit) = player.target(&world.scene, 4.5) {
                     // A hand mines as vanilla's `getDestroyProgress`: a
                     // block's hardness times thirty ticks.
-                    all_events.push(sim::voxel::VoxelEvent::Shot {
-                        block: [hit.pos.0, hit.pos.1, hit.pos.2],
-                        damage: 160.0 / 30.0,
-                        drop_items: true,
-                    });
+                    if authority.is_some() {
+                        all_events.push(sim::voxel::VoxelEvent::Shot {
+                            block: [hit.pos.0, hit.pos.1, hit.pos.2],
+                            damage: 160.0 / 30.0,
+                            drop_items: true,
+                        });
+                    } else {
+                        let _ = action_inbox.push(
+                            local.0,
+                            sim::ClientAction::MinecraftInteract {
+                                request_id: request_ids.allocate(),
+                                kind: 0,
+                                position: [hit.pos.0, hit.pos.1, hit.pos.2],
+                                state: 0,
+                            },
+                        );
+                    }
                     if hand
                         .swing
                         .is_none_or(|t| t >= crate::minecraft_hand::SWING_TICKS * 0.5)
@@ -917,6 +1217,42 @@ fn update(
             || ((buttons.pressed(MouseButton::Right)
                 || pad_trigger(pad, GamepadButton::LeftTrigger2, false))
                 && hand.place_delay == 0);
+        if place && authority.is_none() {
+            hand.place_delay = 4;
+            if let Some(slot) = entities
+                .inventory
+                .slots
+                .get(entities.selected)
+                .and_then(Option::as_ref)
+                && slot.count > 0
+                && let Some(hit) = player.target(&world.scene, 5.0)
+            {
+                let (dx, dy, dz) = hit.face.offset();
+                let neighbour = (hit.pos.0 + dx, hit.pos.1 + dy, hit.pos.2 + dz);
+                let old_hit =
+                    minecraft_terrain::scene::Scene::block(&world.scene, hit.pos).cloned();
+                let old_neighbour =
+                    minecraft_terrain::scene::Scene::block(&world.scene, neighbour).cloned();
+                let block = minecraftoss_player::Block::new(slot.id.clone());
+                if let Some(pos) = player.place_target_with(&mut world.scene, block) {
+                    let state = minecraft_terrain::scene::Scene::block(&world.scene, pos)
+                        .and_then(|block| world.stream.states.state_of(block));
+                    world.scene.set(hit.pos, old_hit);
+                    world.scene.set(neighbour, old_neighbour);
+                    if let Some(state) = state {
+                        let _ = action_inbox.push(
+                            local.0,
+                            sim::ClientAction::MinecraftInteract {
+                                request_id: request_ids.allocate(),
+                                kind: 1,
+                                position: [pos.0, pos.1, pos.2],
+                                state: state.0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         if place && authority.is_some() {
             hand.place_delay = 4;
             if let Some(pos) = player.place_selected(
@@ -1056,6 +1392,28 @@ fn update(
         },
         time.elapsed_secs_f64(),
     );
+    let mut remote_drops = HashSet::new();
+    if authority.is_some() {
+        for (pos, block, _, drops) in &broken {
+            if let Some(client) = remote_mining_owner.remove(pos)
+                && *drops
+                && let Some(state) = world.stream.states.state_of(block)
+            {
+                let stock = remote_stock.entry(client).or_default();
+                if stock.len() < 36 || stock.contains_key(&state.0) {
+                    let count = stock.entry(state.0).or_default();
+                    *count = count.saturating_add(1);
+                    stock_dirty.insert(client);
+                    remote_drops.insert(*pos);
+                }
+            }
+        }
+        remote_mining_owner
+            .retain(|pos, _| minecraft_terrain::scene::Scene::block(&world.scene, *pos).is_some());
+        if remote_mining_owner.len() > 4_096 {
+            remote_mining_owner.clear();
+        }
+    }
     if authority.is_some() {
         changed_blocks.extend(broken.iter().map(|(pos, ..)| *pos));
     }
@@ -1078,7 +1436,12 @@ fn update(
     }
     if let Some(entities) = entities.as_mut() {
         entities.broke(&world.scene, &broken);
-        entities.drop_blocks(&broken);
+        let local_drops: Vec<_> = broken
+            .iter()
+            .filter(|(pos, ..)| !remote_drops.contains(pos))
+            .cloned()
+            .collect();
+        entities.drop_blocks(&local_drops);
     }
 
     let eye = sim::voxel::to_block(
@@ -1190,8 +1553,10 @@ fn update(
 
     // The mobs: a server tick when due, the blocks it changed, its hits on
     // the player, the mobs' boxes for bullets and their meshes.
+    let mut mob_ticks = 0;
     if let Some(entities) = entities.as_mut().filter(|_| authority.is_some()) {
         let player = crate::minecraft_entities::PlayerView {
+            id: u64::from(local.0.0) + 1,
             feet,
             alive,
             health: ps.health as f32,
@@ -1199,14 +1564,37 @@ fn update(
             pitch: ps.viewangles[0],
         };
         let bright_outside = world.environment.sky_light_level() > 11.0;
+        let peers: Vec<_> = authority.as_ref().map_or_else(Vec::new, |authority| {
+            authority
+                .0
+                .clients_scoreboard()
+                .into_iter()
+                .filter_map(|(id, _)| {
+                    if id == local.0 {
+                        return None;
+                    }
+                    let ps = authority.0.player(id)?;
+                    let feet = sim::voxel::to_block(origin, ps.origin);
+                    let yaw_rad = ps.viewangles[1].to_radians();
+                    Some(crate::minecraft_entities::PlayerView {
+                        id: u64::from(id.0) + 1,
+                        feet,
+                        alive: ps.pm_type == 0,
+                        health: ps.health as f32,
+                        yaw: (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees(),
+                        pitch: ps.viewangles[0],
+                    })
+                })
+                .collect()
+        });
         let ticks_before = entities.client_ticks();
-        let (changes, hits) = entities.tick(dt, day.ticks as i64, bright_outside, &player);
+        let (changes, hits) = entities.tick(dt, day.ticks as i64, bright_outside, &player, &peers);
         for (credit, kills) in entities.take_feedback() {
             if let Some(authority) = authority.as_mut() {
                 authority.0.confirm_mob_hit(credit, kills);
             }
         }
-        let mob_ticks = (entities.client_ticks() - ticks_before) as u32;
+        mob_ticks = (entities.client_ticks() - ticks_before) as u32;
         if !changes.is_empty() {
             let blocks = &world.registries.blocks;
             let mut positions = Vec::with_capacity(changes.len());
@@ -1238,13 +1626,15 @@ fn update(
             }
             world.stream.mark_edited(&world.scene, &positions);
         }
-        for (amount, from) in hits {
+        for (player_id, amount, from) in hits {
             sim::voxel::push_player_damage(
-                local.0.0,
+                player_id.saturating_sub(1) as u32,
                 amount,
                 from.map(|b| sim::voxel::to_map(origin, b)),
             );
         }
+    }
+    if let Some(entities) = entities.as_mut() {
         // The inventory: MW2 guns as items, the HUD's clicks, the hotbar's
         // gun, and what the HUD shows.
         let owned: Vec<u32> = ps
@@ -1253,9 +1643,12 @@ fn update(
             .filter(|&&w| w > 0)
             .map(|&w| w as u32)
             .filter(|&w| {
-                authority.as_ref()
-                    .and_then(|authority| authority.0.weapon_combat_row(w))
-                    .is_some_and(|facts| facts.inventory_type == 0)
+                authority.as_ref().map_or(true, |authority| {
+                    authority
+                        .0
+                        .weapon_combat_row(w)
+                        .is_some_and(|facts| facts.inventory_type == 0)
+                })
             })
             .collect();
         ui.active = alive;
@@ -1577,9 +1970,28 @@ fn update(
         }
         if let Some(hub) = hub.as_ref() {
             let clients = hub.committed_clients();
+            let send_mobs = time.elapsed_secs_f64() - *last_mobs_sent >= 0.2;
+            let mob_rows: Vec<Vec<net::MinecraftMobVisual>> = if send_mobs {
+                let mobs = entities
+                    .as_ref()
+                    .map_or_else(Vec::new, |entities| entities.network_snapshot());
+                if mobs.is_empty() {
+                    vec![Vec::new()]
+                } else {
+                    mobs.chunks(16).take(8).map(|part| part.to_vec()).collect()
+                }
+            } else {
+                Vec::new()
+            };
+            if send_mobs {
+                *last_mobs_sent = time.elapsed_secs_f64();
+                *mob_sequence = mob_sequence.wrapping_add(1).max(1);
+            }
             sent_init.retain(|client| clients.contains(client));
             init_progress.retain(|client, _| clients.contains(client));
             live_progress.retain(|client, _| clients.contains(client));
+            remote_stock.retain(|client, _| clients.contains(client));
+            stock_dirty.retain(|client| clients.contains(client));
             for client in clients {
                 let queue = reliable.queue_mut(client);
                 if !sent_init.contains(&client) {
@@ -1613,6 +2025,7 @@ fn update(
                     if init.began && init.next == init.edits.len() {
                         live_progress.insert(client, (init.log_index, 0));
                         sent_init.insert(client);
+                        stock_dirty.insert(client);
                         init_progress.remove(&client);
                     }
                 }
@@ -1631,7 +2044,52 @@ fn update(
                         }
                     }
                 }
+                if send_mobs
+                    && sent_init.contains(&client)
+                    && queue.pending_len() + mob_rows.len() < 48
+                {
+                    for (part, mobs) in mob_rows.iter().enumerate() {
+                        queue.push(net::ReliableRow::Minecraft(net::MinecraftMessage::Mobs {
+                            sequence: *mob_sequence,
+                            part: part as u8,
+                            total: mob_rows.len() as u8,
+                            mobs: mobs.clone(),
+                        }));
+                    }
+                }
+                if sent_init.contains(&client)
+                    && stock_dirty.contains(&client)
+                    && queue.pending_len() < 48
+                {
+                    let mut entries: Vec<_> = remote_stock
+                        .get(&client)
+                        .into_iter()
+                        .flat_map(|stock| stock.iter().map(|(&state, &count)| (state, count)))
+                        .collect();
+                    entries.sort_unstable();
+                    queue.push(net::ReliableRow::Minecraft(net::MinecraftMessage::Stock {
+                        entries,
+                    }));
+                    stock_dirty.remove(&client);
+                }
             }
+            let discard = init_progress
+                .values()
+                .map(|row| row.log_index)
+                .chain(live_progress.values().map(|row| row.0))
+                .min()
+                .unwrap_or(network_log.len());
+            if discard > 0 {
+                network_log.drain(..discard);
+                for row in init_progress.values_mut() {
+                    row.log_index -= discard;
+                }
+                for row in live_progress.values_mut() {
+                    row.0 -= discard;
+                }
+            }
+        } else {
+            network_log.clear();
         }
     }
 }
@@ -1641,12 +2099,21 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
     runtime.network_seed = None;
     runtime.network_edits_expected = None;
     runtime.network_edits.clear();
+    runtime.network_initial_positions.clear();
+    runtime.network_initial_revision = 0;
     runtime.changed_blocks.clear();
     runtime.edit_revision = 0;
     runtime.network_log.clear();
+    runtime.remote_stock.clear();
+    runtime.stock_dirty.clear();
+    runtime.pending_stock = None;
+    runtime.remote_mining_owner.clear();
     runtime.live_progress.clear();
     runtime.sent_init.clear();
     runtime.init_progress.clear();
+    runtime.mob_parts = None;
+    runtime.mob_sequence = 0;
+    runtime.last_mobs_sent = 0.0;
     runtime.minimap = Default::default();
     runtime.retained_collision.clear();
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {

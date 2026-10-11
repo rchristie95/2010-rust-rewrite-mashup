@@ -1002,6 +1002,7 @@ fn apply_action(
 
             ActionOutcome::Accepted
         }
+        ClientAction::MinecraftInteract { .. } => ActionOutcome::Accepted,
         ClientAction::SelectClass {
             request_id,
             class_id,

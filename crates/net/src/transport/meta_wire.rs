@@ -570,6 +570,20 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
             out.put_u32(request_id);
             out.put_bytes(&name);
         }
+        ClientAction::MinecraftInteract {
+            request_id,
+            kind,
+            position,
+            state,
+        } => {
+            out.put_u8(24);
+            out.put_u32(request_id);
+            out.put_u8(kind);
+            for value in position {
+                out.put_i32(value);
+            }
+            out.put_u16(state);
+        }
     }
 }
 
@@ -687,6 +701,25 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
             let mut name = [0u8; sim::MENU_RESPONSE_BYTES];
             input.get_bytes(&mut name)?;
             Ok(ClientAction::GiveKillstreak { request_id, name })
+        }
+        24 => {
+            let request_id = input.get_u32()?;
+            let kind = input.get_u8()?;
+            let position = [input.get_i32()?, input.get_i32()?, input.get_i32()?];
+            let state = input.get_u16()?;
+            if kind > 2
+                || i64::from(position[0]).abs() > 30_000_000
+                || i64::from(position[2]).abs() > 30_000_000
+                || !(-2_048..=2_048).contains(&position[1])
+            {
+                return Err(WireError::Malformed("Minecraft interaction"));
+            }
+            Ok(ClientAction::MinecraftInteract {
+                request_id,
+                kind,
+                position,
+                state,
+            })
         }
         14 => {
             let request_id = input.get_u32()?;

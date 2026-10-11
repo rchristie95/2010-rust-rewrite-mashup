@@ -20,6 +20,9 @@ pub enum MinecraftMessage {
         total: u8,
         mobs: Vec<MinecraftMobVisual>,
     },
+    Stock {
+        entries: Vec<(u16, u16)>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +39,8 @@ pub struct MinecraftMobVisual {
 #[derive(Resource, Default)]
 pub struct MinecraftSync {
     pub incoming: Vec<MinecraftMessage>,
+    pub incoming_intents: Vec<(sim::ClientId, u8, [i32; 3], u16)>,
+    pub accept_intents: bool,
 }
 
 pub(crate) fn encode(out: &mut WireWriter, message: &MinecraftMessage) {
@@ -65,7 +70,12 @@ pub(crate) fn encode(out: &mut WireWriter, message: &MinecraftMessage) {
                 out.put_u32(*block);
             }
         }
-        MinecraftMessage::Mobs { sequence, part, total, mobs } => {
+        MinecraftMessage::Mobs {
+            sequence,
+            part,
+            total,
+            mobs,
+        } => {
             out.put_u8(2);
             out.put_u32(*sequence);
             out.put_u8(*part);
@@ -81,6 +91,14 @@ pub(crate) fn encode(out: &mut WireWriter, message: &MinecraftMessage) {
                 out.put_f32(mob.pitch);
                 out.put_f32(mob.head_yaw);
                 out.put_u8(mob.flags);
+            }
+        }
+        MinecraftMessage::Stock { entries } => {
+            out.put_u8(3);
+            out.put_u8(entries.len() as u8);
+            for (state, count) in entries {
+                out.put_u16(*state);
+                out.put_u16(*count);
             }
         }
     }
@@ -147,14 +165,48 @@ pub(crate) fn decode(input: &mut WireReader<'_>) -> Result<MinecraftMessage, Wir
                 let pitch = input.get_f32()?;
                 let head_yaw = input.get_f32()?;
                 let flags = input.get_u8()?;
-                if kind > 14 || position.iter().any(|v| !v.is_finite() || v.abs() > 30_000_000.0)
-                    || !yaw.is_finite() || !pitch.is_finite() || !head_yaw.is_finite()
+                if kind > 14
+                    || position
+                        .iter()
+                        .any(|v| !v.is_finite() || v.abs() > 30_000_000.0)
+                    || !yaw.is_finite()
+                    || !pitch.is_finite()
+                    || !head_yaw.is_finite()
                 {
                     return Err(WireError::Malformed("Minecraft mob"));
                 }
-                mobs.push(MinecraftMobVisual { id, kind, position, yaw, pitch, head_yaw, flags });
+                mobs.push(MinecraftMobVisual {
+                    id,
+                    kind,
+                    position,
+                    yaw,
+                    pitch,
+                    head_yaw,
+                    flags,
+                });
             }
-            MinecraftMessage::Mobs { sequence, part, total, mobs }
+            MinecraftMessage::Mobs {
+                sequence,
+                part,
+                total,
+                mobs,
+            }
+        }
+        3 => {
+            let count = input.get_u8()? as usize;
+            if count > 36 {
+                return Err(WireError::Malformed("Minecraft stock count"));
+            }
+            let mut entries = Vec::with_capacity(count);
+            for _ in 0..count {
+                let state = input.get_u16()?;
+                let amount = input.get_u16()?;
+                if state == 0 || amount == 0 || entries.iter().any(|(id, _)| *id == state) {
+                    return Err(WireError::Malformed("Minecraft stock entry"));
+                }
+                entries.push((state, amount));
+            }
+            MinecraftMessage::Stock { entries }
         }
         _ => return Err(WireError::Malformed("Minecraft message tag")),
     })

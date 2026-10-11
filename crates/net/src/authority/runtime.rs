@@ -620,6 +620,7 @@ fn gather_authority_input(
     mut samples: ResMut<ClientShotSamples>,
     mut backlog: ResMut<PendingConnectionFaults>,
     mut action_inbox: ResMut<ClientActionInbox>,
+    mut minecraft_sync: ResMut<crate::MinecraftSync>,
     mut ledger: ResMut<crate::ClientActionLedger>,
     mut reliable: ResMut<crate::ReliableEventHub>,
     gate: Res<AuthorityInputGate>,
@@ -646,7 +647,22 @@ fn gather_authority_input(
     for (client, action) in action_inbox.gather() {
         let request_id = sim::action_request_id(&action);
         match ledger.admit(client, &action) {
-            crate::ActionAdmission::Fresh => actions.push((client, action)),
+            crate::ActionAdmission::Fresh => {
+                if let sim::ClientAction::MinecraftInteract {
+                    kind,
+                    position,
+                    state,
+                    ..
+                } = action
+                    && minecraft_sync.accept_intents
+                    && minecraft_sync.incoming_intents.len() < 256
+                {
+                    minecraft_sync
+                        .incoming_intents
+                        .push((client, kind, position, state));
+                }
+                actions.push((client, action));
+            }
             crate::ActionAdmission::Pending => {}
             crate::ActionAdmission::Repeat(verdict) => {
                 reliable.push_outcome(client, request_id, verdict);

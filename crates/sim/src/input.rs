@@ -124,6 +124,13 @@ pub enum ClientAction {
         request_id: ActionRequestId,
         name: [u8; MENU_RESPONSE_BYTES],
     },
+
+    MinecraftInteract {
+        request_id: ActionRequestId,
+        kind: u8,
+        position: [i32; 3],
+        state: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -238,5 +245,6 @@ pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
         | ClientAction::MenuResponse { request_id, .. }
         | ClientAction::GiveKillstreak { request_id, .. }
         | ClientAction::ResupplyAmmo { request_id } => request_id,
+        ClientAction::MinecraftInteract { request_id, .. } => request_id,
     }
 }
