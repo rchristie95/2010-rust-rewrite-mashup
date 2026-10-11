@@ -50,6 +50,9 @@ fn run() -> Result<(), String> {
         game.args(["map", "minecraft:overworld", "--cmds", COMMANDS]);
     }
     game.current_dir(root)
+        .env_remove("IW4L_MASTER_HOST_NAME")
+        .env_remove("IW4L_MASTER_JOIN")
+        .env_remove("IW4L_CMDS")
         .env("IW4L_GAMES", root.join("games/mw2"))
         .env("IW4L_SKATE_ASSETS", root.join("skate-data/assets"))
         .env(
