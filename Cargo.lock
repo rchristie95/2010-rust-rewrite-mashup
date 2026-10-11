@@ -2305,6 +2305,7 @@ dependencies = [
  "net",
  "perf",
  "render",
+ "render_anim",
  "render_frontend",
  "render_fx",
  "replay",

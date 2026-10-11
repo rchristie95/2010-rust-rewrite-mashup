@@ -335,6 +335,7 @@ fn save_clip_package(
             world,
             presented,
             Some(audio),
+            None,
         );
         persist_bytes_atomic(&dump_path, &body)?;
         let mut manifest = ::replay::clip_manifest(

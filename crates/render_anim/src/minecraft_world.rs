@@ -65,6 +65,30 @@ pub struct MinecraftWorldView {
     /// draws them (vanilla's fixed 70 degree hand field of view).
     pub hand: (Vec<u8>, Vec<u32>),
     pub hand_clip: [f32; 16],
+    pub status: Option<MinecraftWorldStatus>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MinecraftWorldStatus {
+    pub seed: i64,
+    pub origin: [f64; 3],
+    pub alive: bool,
+    pub health: i32,
+    pub stream_ready: bool,
+    pub stream_center: (i32, i32, i32),
+    pub edit_revision: u64,
+    pub edit_count: usize,
+    pub edit_fingerprint: u64,
+    pub mob_sequence: u32,
+    pub mob_count: usize,
+}
+
+fn edit_fingerprint(pos: (i32, i32, i32), state: u32) -> u64 {
+    [pos.0 as u32, pos.1 as u32, pos.2 as u32, state]
+        .into_iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, value| {
+            (hash ^ u64::from(value)).wrapping_mul(0x100_0000_01b3)
+        })
 }
 
 struct Loaded {
@@ -113,6 +137,7 @@ struct Runtime {
     network_edits: BTreeMap<(i32, i32, i32), u32>,
     changed_blocks: HashSet<(i32, i32, i32)>,
     edit_revision: u64,
+    edit_fingerprint: u64,
     network_log: Vec<(u64, Vec<([i32; 3], u32)>)>,
     network_initial_revision: u64,
     network_initial_positions: HashSet<(i32, i32, i32)>,
@@ -124,6 +149,7 @@ struct Runtime {
     sent_init: HashSet<sim::ClientId>,
     init_progress: HashMap<sim::ClientId, PeerInit>,
     mob_sequence: u32,
+    mob_count: usize,
     mob_parts: Option<(u32, u8, Vec<Option<Vec<net::MinecraftMobVisual>>>)>,
     last_mobs_sent: f64,
     day: DayCycle,
@@ -467,21 +493,24 @@ fn update(
                 runtime.network_initial_revision = revision;
                 runtime.network_initial_positions.clear();
                 runtime.network_edits.clear();
+                runtime.edit_revision = revision;
+                runtime.edit_fingerprint = 0;
             }
             net::MinecraftMessage::Blocks { revision, changes }
                 if *role == frame::RuntimeRole::Client && view.active =>
             {
                 for (pos, block) in changes {
+                    let point = (pos[0], pos[1], pos[2]);
                     if revision == runtime.network_initial_revision {
-                        runtime
-                            .network_initial_positions
-                            .insert((pos[0], pos[1], pos[2]));
+                        runtime.network_initial_positions.insert(point);
                     }
-                    runtime
-                        .network_edits
-                        .insert((pos[0], pos[1], pos[2]), block);
-                    runtime.changed_blocks.insert((pos[0], pos[1], pos[2]));
+                    if let Some(old) = runtime.network_edits.insert(point, block) {
+                        runtime.edit_fingerprint ^= edit_fingerprint(point, old);
+                    }
+                    runtime.edit_fingerprint ^= edit_fingerprint(point, block);
+                    runtime.changed_blocks.insert(point);
                 }
+                runtime.edit_revision = runtime.edit_revision.max(revision);
             }
             net::MinecraftMessage::Mobs {
                 sequence,
@@ -513,6 +542,7 @@ fn update(
                     }
                 }
                 if let Some(snapshot) = complete {
+                    runtime.mob_count = snapshot.len();
                     if let Some(entities) = runtime.entities.as_mut() {
                         entities.apply_network_snapshot(&snapshot);
                     }
@@ -613,6 +643,7 @@ fn update(
         network_edits,
         changed_blocks,
         edit_revision,
+        edit_fingerprint: edits_hash,
         network_log,
         remote_stock,
         stock_dirty,
@@ -622,6 +653,7 @@ fn update(
         sent_init,
         init_progress,
         mob_sequence,
+        mob_count,
         last_mobs_sent,
         shapes,
         shape_ids,
@@ -1979,7 +2011,10 @@ fn update(
                 let state = minecraft_terrain::scene::Scene::block(&world.scene, pos)
                     .and_then(|block| world.stream.states.state_of(block))
                     .unwrap_or(BlockStateId::AIR);
-                network_edits.insert(pos, u32::from(state.0));
+                if let Some(old) = network_edits.insert(pos, u32::from(state.0)) {
+                    *edits_hash ^= edit_fingerprint(pos, old);
+                }
+                *edits_hash ^= edit_fingerprint(pos, u32::from(state.0));
                 ([pos.0, pos.1, pos.2], u32::from(state.0))
             })
             .collect();
@@ -1994,6 +2029,7 @@ fn update(
                 let mobs = entities
                     .as_ref()
                     .map_or_else(Vec::new, |entities| entities.network_snapshot());
+                *mob_count = mobs.len();
                 if mobs.is_empty() {
                     vec![Vec::new()]
                 } else {
@@ -2111,6 +2147,19 @@ fn update(
             network_log.clear();
         }
     }
+    view.status = Some(MinecraftWorldStatus {
+        seed: world.seed,
+        origin,
+        alive,
+        health: ps.health,
+        stream_ready: *was_alive,
+        stream_center: stream_block,
+        edit_revision: *edit_revision,
+        edit_count: network_edits.len(),
+        edit_fingerprint: *edits_hash,
+        mob_sequence: *mob_sequence,
+        mob_count: *mob_count,
+    });
 }
 
 fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
@@ -2122,6 +2171,7 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
     runtime.network_initial_revision = 0;
     runtime.changed_blocks.clear();
     runtime.edit_revision = 0;
+    runtime.edit_fingerprint = 0;
     runtime.network_log.clear();
     runtime.remote_stock.clear();
     runtime.stock_dirty.clear();
@@ -2132,12 +2182,14 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
     runtime.init_progress.clear();
     runtime.mob_parts = None;
     runtime.mob_sequence = 0;
+    runtime.mob_count = 0;
     runtime.last_mobs_sent = 0.0;
     runtime.minimap = Default::default();
     runtime.retained_collision.clear();
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {
         sim::voxel::deactivate();
         view.active = false;
+        view.status = None;
         view.atlas = None;
         view.uploads.clear();
         view.removed.clear();

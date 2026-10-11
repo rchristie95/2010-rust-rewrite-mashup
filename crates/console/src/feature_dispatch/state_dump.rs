@@ -21,6 +21,7 @@ pub(crate) fn route_state_dump_commands(
         Option<Res<AuthorityClock>>,
         Option<Res<PresentedSnapshot>>,
     ),
+    minecraft: Option<Res<render_anim::minecraft_world::MinecraftWorldView>>,
     (audio_ready, decisions, gaps, clips, runtime): (
         Option<Res<audio::AudioReady>>,
         Option<Res<audio::StartDecisions>>,
@@ -54,6 +55,7 @@ pub(crate) fn route_state_dump_commands(
             authority.as_deref(),
             presented.as_deref(),
             Some(&audio),
+            minecraft.as_ref().and_then(|view| view.status.as_ref()),
         ) {
             Ok(path) => echo.write(format!("dump: wrote {}", path.display())),
             Err(error) => echo.write(format!("dump: {error}")),
@@ -86,6 +88,7 @@ pub(super) fn write_current_state_dump(
     authority: Option<&AuthorityWorld>,
     presented: Option<&PresentedSnapshot>,
     audio: Option<&str>,
+    minecraft: Option<&render_anim::minecraft_world::MinecraftWorldStatus>,
 ) -> Result<PathBuf, String> {
     let identity = identity.ok_or("launch identity missing (artifacts path unknown)")?;
     let captured_unix_ns = SystemTime::now()
@@ -99,6 +102,7 @@ pub(super) fn write_current_state_dump(
         authority,
         presented,
         audio,
+        minecraft,
     );
     persist_state_dump(&identity.artifacts, name, captured_unix_ns, &body)
 }
@@ -163,6 +167,7 @@ pub(super) fn state_dump_body(
     authority: Option<&AuthorityWorld>,
     presented: Option<&PresentedSnapshot>,
     audio: Option<&str>,
+    minecraft: Option<&render_anim::minecraft_world::MinecraftWorldStatus>,
 ) -> String {
     let authority_snapshot = match (authority_clock, authority) {
         (Some(clock), Some(world)) => format!("{:#?}", world.0.snapshot(sim::Tick(clock.tick))),
@@ -180,6 +185,23 @@ pub(super) fn state_dump_body(
         });
     let audio =
         audio.unwrap_or("[audio]\nUnavailable { reason: \"not captured with this dump\" }\n");
+    let minecraft = minecraft.map_or_else(
+        || "[minecraft]\nUnavailable { reason: \"Minecraft world absent\" }\n".to_owned(),
+        |status| format!(
+            "[minecraft]\nseed = {}\norigin = {:?}\nalive = {}\nhealth = {}\nstream_ready = {}\nstream_center = {:?}\nedit_revision = {}\nedit_count = {}\nedit_fingerprint = {:016x}\nmob_sequence = {}\nmob_count = {}\n",
+            status.seed,
+            status.origin,
+            status.alive,
+            status.health,
+            status.stream_ready,
+            status.stream_center,
+            status.edit_revision,
+            status.edit_count,
+            status.edit_fingerprint,
+            status.mob_sequence,
+            status.mob_count,
+        ),
+    );
     let hitvol = match authority {
         Some(world) => {
             let mut out = String::from("[hitvol]\n");
@@ -203,7 +225,7 @@ pub(super) fn state_dump_body(
          authority_clock = {authority_clock:#?}\n\
          \n[authority_snapshot]\n{authority_snapshot}\n\
          \n[presented_snapshot]\n{presented_snapshot}\n\
-         \n{hitvol}\n{audio}",
+         \n{hitvol}\n{audio}\n{minecraft}",
         identity.role_label, identity.zone,
     )
 }

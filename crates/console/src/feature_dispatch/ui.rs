@@ -133,6 +133,7 @@ pub(crate) fn route_ui_commands(
                     authority.as_deref(),
                     presented.as_deref(),
                     None,
+                    None,
                 ) {
                     Ok(path) => echo(
                         format!("menu dump: wrote {}", path.display()),

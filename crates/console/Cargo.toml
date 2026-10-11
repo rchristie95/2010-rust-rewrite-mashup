@@ -21,6 +21,7 @@ audio = { path = "../audio" }
 input_iw4.workspace = true
 net = { path = "../net" }
 render = { path = "../render" }
+render_anim.workspace = true
 render_frontend.workspace = true
 session = { path = "../session" }
 render_fx.workspace = true
