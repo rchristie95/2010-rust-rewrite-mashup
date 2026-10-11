@@ -31,7 +31,18 @@ pub(crate) fn spawn(
         _ => (origin, angles),
     };
     let origin = if sessionstate == "playing" && crate::voxel::active() {
-        let Some(origin) = crate::voxel::spawn_origin() else {
+        let avoid: Vec<_> = world
+            .client_ids_sorted()
+            .into_iter()
+            .filter(|&other| other != id)
+            .filter(|&other| {
+                world
+                    .client_meta(other)
+                    .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
+            })
+            .filter_map(|other| world.player(other).map(|ps| ps.origin))
+            .collect();
+        let Some(origin) = crate::voxel::spawn_clear(&avoid) else {
             diag::warn!(Sim, "spawn: Minecraft collision is not ready");
             return;
         };
@@ -415,9 +426,15 @@ fn forced_point(
         .client_meta(id)
         .map_or(entity_iw4::TEAM_FREE, |m| m.client_state_team);
     let avoid: Vec<[f32; 3]> = world
-        .alive_origins()
+        .client_ids_sorted()
         .into_iter()
-        .filter(|&o| world.player(id).is_none_or(|ps| ps.origin != o))
+        .filter(|&other| other != id)
+        .filter(|&other| {
+            world
+                .client_meta(other)
+                .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
+        })
+        .filter_map(|other| world.player(other).map(|ps| ps.origin))
         .collect();
     let report = crate::spawn::decide_forced_spawn(world, pick, &avoid, team);
     crate::step::log_forced_spawn(id, pick, &report);

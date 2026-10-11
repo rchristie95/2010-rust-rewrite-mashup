@@ -348,6 +348,31 @@ pub(crate) fn decide_forced_spawn(
     avoid: &[[f32; 3]],
     client_state_team: i32,
 ) -> SpawnAttemptReport {
+    if crate::voxel::active() {
+        let traced_origin = crate::voxel::spawn_clear(avoid);
+        return SpawnAttemptReport {
+            tried: 1,
+            rejected: if traced_origin.is_some() {
+                Vec::new()
+            } else {
+                vec![(FORCED_SPAWN_SOURCE, SpawnReject::NoGroundHit)]
+            },
+            accepted: traced_origin.map(|traced_origin| SpawnDecision {
+                classname: String::from("minecraft"),
+                source_index: FORCED_SPAWN_SOURCE,
+                raw_origin: [0.0; 3],
+                raw_angles: [
+                    0.0,
+                    match pick {
+                        crate::SpawnPick::At { yaw, .. } => yaw,
+                        _ => 0.0,
+                    },
+                    0.0,
+                ],
+                traced_origin,
+            }),
+        };
+    }
     let mut refused_at = None;
     let seed = match pick {
         crate::SpawnPick::Seeded(seed) => seed,

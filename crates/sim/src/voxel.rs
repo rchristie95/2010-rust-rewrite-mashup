@@ -560,15 +560,46 @@ pub(crate) fn active_for(brushes: &[SimBrush]) -> bool {
 }
 
 pub fn spawn_origin() -> Option<[f32; 3]> {
+    spawn_clear(&[])
+}
+
+pub fn spawn_clear(avoid: &[[f32; 3]]) -> Option<[f32; 3]> {
+    for radius in 0i32..=8 {
+        for x in -radius..=radius {
+            for y in -radius..=radius {
+                if x.abs().max(y.abs()) != radius {
+                    continue;
+                }
+                let horizontal = [x as f32 * BLOCK * 2.0, y as f32 * BLOCK * 2.0];
+                if let Some(feet) = spawn_at(horizontal)
+                    && avoid.iter().all(|other| {
+                        (feet[0] - other[0]).abs() >= 30.0
+                            || (feet[1] - other[1]).abs() >= 30.0
+                            || (feet[2] - other[2]).abs() >= 70.0
+                    })
+                {
+                    return Some(feet);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn spawn_at(horizontal: [f32; 2]) -> Option<[f32; 3]> {
     use crate::bullet_collision::{PLAYER_MAXS, PLAYER_MINS};
     let mut surfaces = {
         let guard = WORLD.read().ok()?;
         let world = guard.as_ref()?;
         let scale = f64::from(BLOCK);
-        let min_x = (world.origin[0] + f64::from(PLAYER_MINS[0]) / scale).floor() as i32;
-        let max_x = (world.origin[0] + f64::from(PLAYER_MAXS[0]) / scale).floor() as i32;
-        let min_z = (world.origin[2] - f64::from(PLAYER_MAXS[1]) / scale).floor() as i32;
-        let max_z = (world.origin[2] - f64::from(PLAYER_MINS[1]) / scale).floor() as i32;
+        let min_x =
+            (world.origin[0] + f64::from(horizontal[0] + PLAYER_MINS[0]) / scale).floor() as i32;
+        let max_x =
+            (world.origin[0] + f64::from(horizontal[0] + PLAYER_MAXS[0]) / scale).floor() as i32;
+        let min_z =
+            (world.origin[2] - f64::from(horizontal[1] + PLAYER_MAXS[1]) / scale).floor() as i32;
+        let max_z =
+            (world.origin[2] - f64::from(horizontal[1] + PLAYER_MINS[1]) / scale).floor() as i32;
         let mut surfaces = Vec::new();
         for x in min_x..=max_x {
             for z in min_z..=max_z {
@@ -587,12 +618,12 @@ pub fn spawn_origin() -> Option<[f32; 3]> {
     surfaces.sort_by(|a, b| a.abs().total_cmp(&b.abs()).then(a.total_cmp(b)));
     surfaces.dedup();
     surfaces.into_iter().find_map(|height| {
-        let feet = [0.0, 0.0, height];
+        let feet = [horizontal[0], horizontal[1], height];
         let clear = trace(feet, feet, PLAYER_MINS, PLAYER_MAXS);
         if clear.startsolid != 0 || clear.allsolid != 0 {
             return None;
         }
-        let below = [0.0, 0.0, height - 0.25];
+        let below = [horizontal[0], horizontal[1], height - 0.25];
         let floor = trace(feet, below, PLAYER_MINS, PLAYER_MAXS);
         if floor.startsolid != 0
             || floor.allsolid != 0

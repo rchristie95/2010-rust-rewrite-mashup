@@ -870,15 +870,38 @@ fn update(
     // Generated spawn height is only a hint. Uploaded collision must prove
     // a clear standing box and a walkable floor before admitting a class.
     let spawn_at = if !*was_alive {
-        sim::voxel::spawn_origin()
+        if let Some(authority) = authority.as_ref() {
+            let avoid: Vec<_> = authority
+                .0
+                .clients_scoreboard()
+                .into_iter()
+                .filter_map(|(id, _)| {
+                    (id != local.0)
+                        .then(|| authority.0.player(id))
+                        .flatten()
+                        .filter(|player| player.pm_type == 0 && player.health > 0)
+                        .map(|player| player.origin)
+                })
+                .collect();
+            sim::voxel::spawn_clear(&avoid)
+        } else {
+            sim::voxel::spawn_origin()
+        }
     } else {
         None
     };
     ui.loading_world = !*was_alive && spawn_at.is_none();
-    if alive && !*was_alive && let Some(at) = spawn_at {
+    if alive
+        && !*was_alive
+        && let Some(at) = spawn_at
+    {
         if let Some(authority) = authority.as_mut() {
             if authority.0.teleport(local.0, at) {
-                diag::info!(World, "Minecraft spawn: moved to clear world spawn {:?}", at);
+                diag::info!(
+                    World,
+                    "Minecraft spawn: moved to clear world spawn {:?}",
+                    at
+                );
                 *was_alive = true;
             }
         } else if *role == frame::RuntimeRole::Client {
