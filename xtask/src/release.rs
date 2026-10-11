@@ -214,6 +214,7 @@ fn community(channel: Channel, host: &str, ca_path: &Path) -> Res<updater::Commu
             server_name: channel.server_name().into(),
         },
         updates: updater::Updates {
+            auto_update: true,
             url: format!("https://{host}:{}/updates/manifest.toml", channel.port()),
             ca_pem: std::fs::read_to_string(ca_path).map_err(|e| e.to_string())?,
         },

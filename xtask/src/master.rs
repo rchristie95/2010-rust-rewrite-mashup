@@ -308,6 +308,7 @@ fn hand_out(ssh: &Ssh, channel: Channel, ca: &Ca) -> Res<()> {
             },
         },
         updates: updater::Updates {
+            auto_update: true,
             url: format!(
                 "https://{}:{}/updates/manifest.toml",
                 ssh.host(),
