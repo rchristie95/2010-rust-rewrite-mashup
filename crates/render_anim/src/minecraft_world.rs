@@ -803,6 +803,12 @@ fn update(
             .unwrap_or(block)
     };
     let (loaded, forgotten) = world.stream.server_tick(stream_block, &mut world.scene);
+    let spawn_center = if !*was_alive {
+        [0.0; 2]
+    } else {
+        [ps.origin[0], ps.origin[1]]
+    };
+    sim::voxel::set_spawn_center(spawn_center);
     if let Some(authority) = authority.as_mut() {
         for (id, _) in authority.0.clients_scoreboard() {
             if id == local.0 {
@@ -901,27 +907,29 @@ fn update(
 
     // Generated spawn height is only a hint. Uploaded collision must prove
     // a clear standing box and a walkable floor before admitting a class.
-    let spawn_at = if !*was_alive {
-        if let Some(authority) = authority.as_ref() {
-            let avoid: Vec<_> = authority
-                .0
-                .clients_scoreboard()
-                .into_iter()
-                .filter_map(|(id, _)| {
-                    (id != local.0)
-                        .then(|| authority.0.player(id))
-                        .flatten()
-                        .filter(|player| player.pm_type == 0 && player.health > 0)
-                        .map(|player| player.origin)
-                })
-                .collect();
-            sim::voxel::spawn_clear(&avoid)
+    let spawn_at =
+        if !*was_alive && sim::voxel::spawn_area_ready(world.stream.view_distance().min(2)) {
+            if let Some(authority) = authority.as_ref() {
+                let avoid: Vec<_> = authority
+                    .0
+                    .clients_scoreboard()
+                    .into_iter()
+                    .filter_map(|(id, _)| {
+                        (id != local.0)
+                            .then(|| authority.0.player(id))
+                            .flatten()
+                            .filter(|player| player.pm_type == 0 && player.health > 0)
+                            .map(|player| player.origin)
+                    })
+                    .collect();
+                sim::voxel::spawn_existing(ps.origin, &avoid)
+                    .or_else(|| sim::voxel::spawn_clear(&avoid))
+            } else {
+                sim::voxel::spawn_origin()
+            }
         } else {
-            sim::voxel::spawn_origin()
-        }
-    } else {
-        None
-    };
+            None
+        };
     ui.loading_world = !*was_alive && spawn_at.is_none();
     if alive
         && !*was_alive

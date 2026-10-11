@@ -32,6 +32,7 @@ pub struct VoxelWorld {
     minimap: Option<hud_iw4::CompassMapBounds>,
     brushes: usize,
     origin: [f64; 3],
+    spawn_center: [f32; 2],
     chunks: HashMap<(i32, i32), VoxelChunk>,
     /// Collision boxes of each shape id, in block space `[min, max]`; id 0 is
     /// empty.
@@ -409,6 +410,7 @@ pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]
             minimap: None,
             brushes: brushes.as_ptr() as usize,
             origin,
+            spawn_center: [0.0; 2],
             chunks: HashMap::new(),
             shapes,
         });
@@ -560,30 +562,97 @@ pub(crate) fn active_for(brushes: &[SimBrush]) -> bool {
 }
 
 pub fn spawn_origin() -> Option<[f32; 3]> {
-    spawn_clear(&[])
-}
-
-pub fn spawn_clear(avoid: &[[f32; 3]]) -> Option<[f32; 3]> {
+    let center = WORLD.read().ok()?.as_ref()?.spawn_center;
     for radius in 0i32..=8 {
         for x in -radius..=radius {
             for y in -radius..=radius {
                 if x.abs().max(y.abs()) != radius {
                     continue;
                 }
-                let horizontal = [x as f32 * BLOCK * 2.0, y as f32 * BLOCK * 2.0];
-                if let Some(feet) = spawn_at(horizontal)
-                    && avoid.iter().all(|other| {
-                        (feet[0] - other[0]).abs() >= 30.0
-                            || (feet[1] - other[1]).abs() >= 30.0
-                            || (feet[2] - other[2]).abs() >= 70.0
-                    })
-                {
+                if let Some(feet) = spawn_at([
+                    center[0] + x as f32 * BLOCK * 2.0,
+                    center[1] + y as f32 * BLOCK * 2.0,
+                ]) {
                     return Some(feet);
                 }
             }
         }
     }
     None
+}
+
+/// Keep respawns inside the terrain loaded around the real player, rather
+/// than following a remote aircraft camera or returning to an unloaded origin.
+pub fn set_spawn_center(center: [f32; 2]) {
+    if center.iter().all(|v| v.is_finite())
+        && let Ok(mut world) = WORLD.write()
+        && let Some(world) = world.as_mut()
+    {
+        world.spawn_center = center;
+    }
+}
+
+/// Admit the initial match only once there is room to spread the combatants.
+pub fn spawn_area_ready(radius: i32) -> bool {
+    let Ok(world) = WORLD.read() else {
+        return false;
+    };
+    let Some(world) = world.as_ref() else {
+        return false;
+    };
+    let at = to_block(
+        world.origin,
+        [world.spawn_center[0], world.spawn_center[1], 0.0],
+    );
+    let (x, z) = (at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4);
+    (-radius..=radius)
+        .all(|dx| (-radius..=radius).all(|dz| world.chunks.contains_key(&(x + dx, z + dz))))
+}
+
+fn spawn_unoccupied(feet: [f32; 3], avoid: &[[f32; 3]]) -> bool {
+    avoid.iter().all(|other| {
+        (feet[0] - other[0]).abs() >= 30.0
+            || (feet[1] - other[1]).abs() >= 30.0
+            || (feet[2] - other[2]).abs() >= 70.0
+    })
+}
+
+/// Preserve an already chosen spawn when presentation catches up with authority.
+pub fn spawn_existing(at: [f32; 3], avoid: &[[f32; 3]]) -> Option<[f32; 3]> {
+    spawn_at([at[0], at[1]]).filter(|&feet| spawn_unoccupied(feet, avoid))
+}
+
+pub fn spawn_clear(avoid: &[[f32; 3]]) -> Option<[f32; 3]> {
+    if avoid.is_empty() {
+        return spawn_origin();
+    }
+    let center = WORLD.read().ok()?.as_ref()?.spawn_center;
+    let mut best = None;
+    let mut best_distance = -1.0;
+    // A 64-block-wide arena fits safely inside the host's loaded region.
+    // Maximise distance to the nearest living player instead of accepting
+    // the first empty two-block spot beside the world's origin.
+    for x in -4..=4 {
+        for y in -4..=4 {
+            let horizontal = [
+                center[0] + x as f32 * BLOCK * 8.0,
+                center[1] + y as f32 * BLOCK * 8.0,
+            ];
+            if let Some(feet) = spawn_at(horizontal)
+                && spawn_unoccupied(feet, avoid)
+            {
+                let distance = avoid
+                    .iter()
+                    .map(|other| (feet[0] - other[0]).powi(2) + (feet[1] - other[1]).powi(2))
+                    .fold(f32::INFINITY, f32::min);
+                if distance > best_distance {
+                    best = Some(feet);
+                    best_distance = distance;
+                }
+            }
+        }
+    }
+    best.or_else(|| spawn_existing(spawn_origin()?, avoid))
 }
 
 fn spawn_at(horizontal: [f32; 2]) -> Option<[f32; 3]> {

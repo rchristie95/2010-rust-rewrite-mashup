@@ -593,6 +593,15 @@ fn fires(classname: &str) -> Option<Fires> {
 
 fn volume<'f>(runtime: &mut Runtime, frame: &'f FrameWorld, object: u64) -> Option<Volume<'f>> {
     let entity = runtime.entities.get(&object)?;
+    // The proxy map supplies assets, not Minecraft's boundaries. Its baked
+    // death volumes otherwise kill players standing on valid low terrain.
+    // Runtime cylinders such as care-package interaction remain active.
+    if crate::voxel::active()
+        && entity.classname.as_ref() == "trigger_hurt"
+        && (entity.brush.is_some() || entity.trigger_model.is_some())
+    {
+        return None;
+    }
     let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
     let origin = match runtime.object_field(object, "origin") {
         Value::Vector(v) => v,
