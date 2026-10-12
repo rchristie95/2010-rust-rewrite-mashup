@@ -376,6 +376,7 @@ fn build_internal<S: Scene>(scene: &S, packs: &PackStack, preload_blocks: bool) 
     textures.insert(ResourceId::parse("minecraft:entity/bat/bat")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/zombie/zombie")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/player/wide/steve")?, ());
+    textures.insert(ResourceId::parse("minecraft:item/diamond_pickaxe")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/skeleton/skeleton")?, ());
     for skin in ["stray", "stray_overlay", "bogged", "bogged_overlay", "parched"] {
         textures.insert(ResourceId::parse(&format!("minecraft:entity/skeleton/{skin}"))?, ());
@@ -407,6 +408,7 @@ fn build_internal<S: Scene>(scene: &S, packs: &PackStack, preload_blocks: bool) 
     textures.insert(ResourceId::parse("minecraft:item/splash_potion")?, ());
     textures.insert(ResourceId::parse("minecraft:item/potion_overlay")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/zombie/husk")?, ());
+    textures.insert(ResourceId::parse("minecraft:entity/player/wide/steve")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/zombie/husk_baby")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/zombie_villager/zombie_villager")?, ());
     textures.insert(ResourceId::parse("minecraft:entity/zombie_villager/zombie_villager_baby")?, ());

@@ -804,9 +804,10 @@ fn use_reload_as_reload(
 }
 
 pub fn sample_client_input(
-    (skate, mut minecraft): (
+    (skate, mut minecraft, mouse_buttons): (
         Option<Res<frame::SkateMode>>,
         Option<ResMut<frame::MinecraftUi>>,
+        Res<ButtonInput<MouseButton>>,
     ),
     time: Res<Time<Real>>,
     mut actions: ResMut<ClientActionInput>,
@@ -1178,6 +1179,10 @@ pub fn sample_client_input(
     actions.client.airborne =
         ps.is_some_and(|ps| ps.ground_entity_num == playerstate_iw4::ENTITYNUM_NONE);
     let mut cmd = build_usercmd(&mut actions, &look, 0);
+    if minecraft.as_ref().is_some_and(|ui| ui.active) && mouse_buttons.pressed(MouseButton::Middle)
+    {
+        cmd.buttons &= !playerstate_iw4::buttons::MELEE_CHARGE;
+    }
     use_reload_as_reload(&mut actions, &mut cmd, ps);
     if minecraft
         .as_ref()

@@ -390,13 +390,16 @@ fn block_shape(
     }
     *shapes.entry(state).or_insert_with(|| {
         let boxes = blocks.collision_boxes(state);
-        if let Some(fluid) = blocks.state(state).fluid
-            && fluid.kind == minecraftoss_core::block::FluidKind::Water
-        {
-            return sim::voxel::add_water_shape(
-                boxes.iter().map(|b| b.map(|v| v as f32)).collect(),
-                fluid.amount,
-            )
+        if let Some(fluid) = blocks.state(state).fluid {
+            let boxes = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
+            return match fluid.kind {
+                minecraftoss_core::block::FluidKind::Water => {
+                    sim::voxel::add_water_shape(boxes, fluid.amount)
+                }
+                minecraftoss_core::block::FluidKind::Lava => {
+                    sim::voxel::add_lava_shape(boxes, fluid.amount)
+                }
+            }
             .unwrap_or(0);
         }
         if boxes.is_empty() {
@@ -474,6 +477,9 @@ fn update(
         || (*role == frame::RuntimeRole::Client && view.active && runtime.world.is_none());
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
+        ui.workbench_open = false;
+        ui.inventory_open = false;
+        ui.clicks.clear();
         ui.minimap = None;
         minecraft_sync.accept_intents = false;
         minecraft_sync.incoming_intents.clear();
@@ -994,6 +1000,14 @@ fn update(
             actor.pitch = f64::from(remote.viewangles[0]);
             let pos = (position[0], position[1], position[2]);
             match kind {
+                3 if actor
+                    .target(&world.scene, 5.0)
+                    .is_some_and(|hit| hit.pos == pos) =>
+                {
+                    if let Some(entities) = entities.as_mut() {
+                        entities.use_block(&world.scene, pos, remote_yaw);
+                    }
+                }
                 2 => {
                     if let (Some(entities), Some(meta)) =
                         (entities.as_mut(), authority.0.client_meta(client))
@@ -1193,6 +1207,46 @@ fn update(
     hand.clock += dt_hand;
     let hand_ticks = (hand.clock / TICK_SECONDS) as u32;
     hand.clock -= f64::from(hand_ticks) * TICK_SECONDS;
+    // Minecraft use is separate from MW2 ADS and crate pickup, and works
+    // with a gun selected as well as with an item or an empty hand.
+    let use_block = buttons.just_pressed(MouseButton::Middle) || std::mem::take(&mut ui.interaction_requested);
+    if alive
+        && !ui.inventory_open
+        && use_block
+        && !presented
+            .snapshot()
+            .and_then(|s| s.meta.for_client(local.0))
+            .is_some_and(|meta| {
+                meta.controls.usability_disabled
+                    || meta.controls.linked
+                    || meta.remote_missile.is_some()
+            })
+        && let Some(entities) = entities.as_mut()
+    {
+        let mut player = minecraftoss_player::Player::new(glam::DVec3::from_array(feet));
+        player.yaw = f64::from(mc_yaw);
+        player.pitch = f64::from(ps.viewangles[0]);
+        if let Some(hit) = player.target(&world.scene, 5.0) {
+            let crafting = minecraft_terrain::scene::Scene::block(&world.scene, hit.pos)
+                .is_some_and(|block| block.id.path == "crafting_table");
+            if crafting {
+                ui.workbench_open = true;
+                ui.inventory_open = true;
+            } else if authority.is_some() {
+                entities.use_block(&world.scene, hit.pos, mc_yaw);
+            } else {
+                let _ = action_inbox.push(
+                    local.0,
+                    sim::ClientAction::MinecraftInteract {
+                        request_id: request_ids.allocate(),
+                        kind: 3,
+                        position: [hit.pos.0, hit.pos.1, hit.pos.2],
+                        state: 0,
+                    },
+                );
+            }
+        }
+    }
     if let Some(entities) = entities.as_mut()
         && ui.holding_item
         && !ui.inventory_open
@@ -1715,32 +1769,39 @@ fn update(
                 );
             }
         }
-        // The held item in view; an empty hand is MW2's own hands.
+        // Minecraft items and the blocky right arm use the same atlas/pass.
         view.hand = Default::default();
         let swing = hand.swing.map_or(0.0, |t| {
             (t / crate::minecraft_hand::SWING_TICKS).clamp(0.0, 1.0)
         });
         ui.hand_swing = swing;
-        if ui.holding_item
-            && !puppet.active
-            && let Some(stack) = entities.inventory.slots[entities.selected].clone()
-        {
+        if ui.holding_item && !puppet.active {
             let eye_light_at = glam::Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32);
-            let display = minecraft_terrain::pack::ResourceId::parse(&stack.id)
-                .ok()
-                .and_then(|id| {
-                    minecraft_terrain::model::item_first_person_transform(&world.packs, &id).ok()
-                })
-                .unwrap_or(glam::Mat4::IDENTITY);
-            let pose = crate::minecraft_hand::item_pose(display, swing, 0.0);
-            let mesh = entities.held_item_mesh(
-                &stack.id,
-                pose,
-                eye_light_at,
-                &world.packs,
-                &world.atlas,
-                light,
-            );
+            let stack = entities.inventory.slots[entities.selected].clone();
+            let mesh = if let Some(stack) = stack {
+                let display = minecraft_terrain::pack::ResourceId::parse(&stack.id)
+                    .ok()
+                    .and_then(|id| {
+                        minecraft_terrain::model::item_first_person_transform(&world.packs, &id)
+                            .ok()
+                    })
+                    .unwrap_or(glam::Mat4::IDENTITY);
+                let pose = crate::minecraft_hand::item_pose(display, swing, 0.0);
+                entities.held_item_mesh(
+                    &stack.id,
+                    pose,
+                    eye_light_at,
+                    &world.packs,
+                    &world.atlas,
+                    light,
+                )
+            } else {
+                minecraft_terrain::cow_render::first_person_arm(
+                    &world.atlas,
+                    crate::minecraft_hand::arm_pose(swing),
+                    view.eye_light,
+                )
+            };
             let vertices: Vec<minecraft_terrain::mesh::SectionVertex> = mesh
                 .vertices
                 .iter()

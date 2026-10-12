@@ -541,6 +541,24 @@ fn update(
             _ => {}
         }
     }
+    if mode.active && sim::voxel::active() {
+        let at = mode.root.w_axis.truncate().to_array();
+        if sim::voxel::water_level(at, 60.0) > 0 || sim::voxel::lava_contact(at) {
+            // The Skate worker has no fluid volumes. Return motion to the
+            // shared collision-aware swimming simulation on entering a fluid.
+            stop(&mut host, &mut mode, authority.as_deref_mut(), true);
+            if *role == frame::RuntimeRole::Client {
+                publish_client_motion(
+                    &mut host,
+                    &mode,
+                    local.0,
+                    actions.as_deref_mut(),
+                    request_ids.as_deref_mut(),
+                );
+            }
+            return;
+        }
+    }
     if std::mem::take(&mut mode.toggle_requested) && alive {
         if mode.active || host.enter_requested || host.activating {
             let preserve_velocity = mode.active;
@@ -554,6 +572,11 @@ fn update(
         }
         if host.send.is_none() {
             diag::warn!(World, "Skate session unavailable: {}", mode.status);
+            return;
+        }
+        if ps.is_some_and(|ps| {
+            sim::voxel::water_level(ps.origin, 60.0) > 0 || sim::voxel::lava_contact(ps.origin)
+        }) {
             return;
         }
         host.enter_requested = true;

@@ -147,15 +147,25 @@ impl Entities {
     }
 
     pub(crate) fn new_remote(seed: i64) -> Self {
-        Self::with_server(None, seed, Inventory::default(), None)
+        let mut inventory = Inventory::default();
+        if let Some(jar) = data_jar()
+            && let Ok(recipes) = minecraftoss_player::crafting::RecipeBook::from_jar(&jar)
+        {
+            inventory.recipes = std::sync::Arc::new(recipes);
+        }
+        Self::with_server(None, seed, inventory, None)
     }
 
     fn with_server(
         server: Option<ServerHandle>,
         seed: i64,
-        inventory: Inventory,
+        mut inventory: Inventory,
         loot: Option<LootBook>,
     ) -> Self {
+        let mut pickaxe =
+            minecraftoss_player::inventory::ItemStack::new("minecraft:diamond_pickaxe", 1);
+        pickaxe.max = 1;
+        inventory.slots[8] = Some(pickaxe);
         Self {
             server,
             remote_mobs: HashMap::new(),
@@ -598,6 +608,23 @@ impl Entities {
             light,
         );
         mesh
+    }
+
+    pub(crate) fn use_block(
+        &mut self,
+        scene: &minecraft_terrain::scene::HandcraftedScene,
+        pos: (i32, i32, i32),
+        yaw: f32,
+    ) -> bool {
+        let facing = match ((yaw / 90.0).round() as i32).rem_euclid(4) {
+            0 => "south",
+            1 => "west",
+            2 => "north",
+            _ => "east",
+        };
+        self.server
+            .as_mut()
+            .is_some_and(|server| server.use_block(scene, pos, facing))
     }
 
     /// A fist on the mob the player looks at within reach (one damage, as

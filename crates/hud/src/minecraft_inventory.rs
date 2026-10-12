@@ -53,7 +53,7 @@ const GRID_X: f32 = -98.0;
 const BOX: [f32; 4] = [-73.0, -100.0, 62.0, 86.0];
 
 /// Where each slot of the screen sits (x, y, size).
-fn layout() -> Vec<(McSlot, f32, f32, f32)> {
+fn layout(workbench: bool) -> Vec<(McSlot, f32, f32, f32)> {
     let mut out = Vec::new();
     // Armor, head to feet down the left (slots 39..36).
     for (row, slot) in [39usize, 38, 37, 36].into_iter().enumerate() {
@@ -62,11 +62,16 @@ fn layout() -> Vec<(McSlot, f32, f32, f32)> {
     // The offhand beside the character window.
     out.push((McSlot::Inventory(40), BOX[0] + BOX[2] + 3.0, -34.0, S));
     // The 2x2 crafting grid and its result.
-    for i in 0..4 {
+    let side = if workbench { 3 } else { 2 };
+    for i in 0..side * side {
         out.push((
-            McSlot::Crafting(i),
-            22.0 + (i % 2) as f32 * P,
-            -86.0 + (i / 2) as f32 * P,
+            if workbench {
+                McSlot::Workbench(i)
+            } else {
+                McSlot::Crafting(i)
+            },
+            12.0 + (i % side) as f32 * P,
+            -86.0 + (i / side) as f32 * P,
             S,
         ));
     }
@@ -340,6 +345,7 @@ fn stack_at<'a>(ui: &'a MinecraftUi, slot: McSlot) -> Option<&'a McStack> {
     match slot {
         McSlot::Inventory(i) => ui.slots.get(i)?.as_ref(),
         McSlot::Crafting(i) => ui.crafting.get(i)?.as_ref(),
+        McSlot::Workbench(i) => ui.workbench.get(i)?.as_ref(),
         McSlot::Result => ui.result.as_ref(),
     }
 }
@@ -518,7 +524,7 @@ pub(crate) fn update_minecraft_hud(
         ui.character_box = None;
     } else {
         for _ in wheel.read() {}
-        let hovered = mouse.and_then(|m| hovered_slot(&surface, m));
+        let hovered = mouse.and_then(|m| hovered_slot(&surface, m, ui.workbench_open));
         let inside = mouse.is_some_and(|m| over_panel(&surface, m));
         handle_clicks(
             &mut ui, &mut input, &buttons, hovered, inside, shift, digit, now,
@@ -569,12 +575,18 @@ pub(crate) fn update_minecraft_hud(
     };
 }
 
-fn hovered_slot(surface: &crate::surface::Hud2dSurface, mouse: Vec2) -> Option<McSlot> {
-    layout().into_iter().find_map(|(slot, x, y, size)| {
-        let r = surface.apply_rect(x * K, y * K, size * K, size * K, CENTER, CENTER);
-        (mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y && mouse.y < r.y + r.h)
-            .then_some(slot)
-    })
+fn hovered_slot(
+    surface: &crate::surface::Hud2dSurface,
+    mouse: Vec2,
+    workbench: bool,
+) -> Option<McSlot> {
+    layout(workbench)
+        .into_iter()
+        .find_map(|(slot, x, y, size)| {
+            let r = surface.apply_rect(x * K, y * K, size * K, size * K, CENTER, CENTER);
+            (mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y && mouse.y < r.y + r.h)
+                .then_some(slot)
+        })
 }
 
 fn over_panel(surface: &crate::surface::Hud2dSurface, mouse: Vec2) -> bool {
@@ -856,7 +868,11 @@ fn draw_inventory(
         PANEL_Y + 5.0,
         10.0,
         HIGHLIGHT,
-        "INVENTORY",
+        if ui.workbench_open {
+            "CRAFTING TABLE"
+        } else {
+            "INVENTORY"
+        },
         false,
         c,
     );
@@ -910,7 +926,9 @@ fn draw_inventory(
         FONT_SMALL, 22.0, -100.0, 6.0, TEXT_DIM, "CRAFTING", false, c,
     );
     canvas.fill(22.0, -92.5, 90.0, 0.5, EDGE, c);
-    canvas.text(FONT_TITLE, 68.0, -73.5, 11.0, TEXT_DIM, ">", false, c);
+    if !ui.workbench_open {
+        canvas.text(FONT_TITLE, 68.0, -73.5, 11.0, TEXT_DIM, ">", false, c);
+    }
     canvas.text(
         FONT_SMALL, GRID_X, -6.5, 6.0, TEXT_DIM, "BACKPACK", false, c,
     );
@@ -925,7 +943,7 @@ fn draw_inventory(
     );
 
     // The slots.
-    for (slot, x, y, size) in layout() {
+    for (slot, x, y, size) in layout(ui.workbench_open) {
         let hover = hovered == Some(slot);
         let is_result = slot == McSlot::Result;
         canvas.fill(x, y, size, size, if hover { SLOT_HOVER } else { SLOT }, c);

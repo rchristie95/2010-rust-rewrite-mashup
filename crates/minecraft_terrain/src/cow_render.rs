@@ -512,6 +512,36 @@ pub(crate) fn cube_tinted_pose_mirror(
     cube_scaled(mesh, feet, rotation, Vec3::splat(scale), region, sky, block, from, to, uv, pivot, part_rotation, tint, texture_size, uv_dimensions, mirror);
 }
 
+/// Pack-backed Steve right arm for the first-person empty hand. The ordinary
+/// humanoid cube UVs preserve the sleeve and skin, without an MW2 gun pose.
+pub fn first_person_arm(atlas: &Atlas, pose: glam::Mat4, light: [f32; 2]) -> ChunkMesh {
+    let mut mesh = ChunkMesh::default();
+    let skin = ResourceId::parse("minecraft:entity/player/wide/steve").unwrap();
+    cube_tinted_pose_mirror(
+        &mut mesh,
+        DVec3::ZERO,
+        Quat::IDENTITY,
+        1.0,
+        atlas.entity_region(&skin),
+        light[0],
+        light[1],
+        [-2.0, 0.0, -2.0],
+        [2.0, 12.0, 2.0],
+        [40.0, 16.0],
+        [0.0; 3],
+        Quat::IDENTITY,
+        [1.0; 3],
+        [64.0, 64.0],
+        None,
+        false,
+    );
+    for vertex in &mut mesh.vertices {
+        let p = Vec3::from_array(vertex.position) - Vec3::Y * 1.501;
+        vertex.position = pose.transform_point3(p).to_array();
+    }
+    mesh
+}
+
 /// A model cuboid with a per-axis model scale about the feet (a renderer's
 /// `scale` step, as `CreeperRenderer` swells).
 #[allow(clippy::too_many_arguments)]

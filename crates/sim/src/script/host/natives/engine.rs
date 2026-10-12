@@ -2176,6 +2176,14 @@ fn register_damage(registry: &mut NativeRegistry) {
             min,
             credit,
         );
+        if crate::voxel::active() && (512.0..=1024.0).contains(&radius) && max > 0.0 {
+            // MW2 airstrikes call glassRadiusDamage at every terrain impact,
+            // separately from the airborne cluster effect. The native map's
+            // authored debris does not exist on generated Minecraft terrain.
+            let index = crate::frame::FrameWorld::from_world(world)
+                .effect_name_index("explosions/artilleryExp_dirt_brown");
+            world_event(world, entity_iw4::EntityEventKind::PLAY_FX, index, origin, [0.0, 0.0, 1.0]);
+        }
         Ok(Value::Undefined)
     });
 }

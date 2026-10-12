@@ -2119,6 +2119,12 @@ struct ClipBackend<'a> {
 }
 
 impl CollisionBackend for ClipBackend<'_> {
+    fn water_entry(&self, start: [f32; 3], end: [f32; 3], view_height: f32) -> Option<[f32; 3]> {
+        if !crate::voxel::active_for(self.brushes) {
+            return None;
+        }
+        crate::voxel::water_entry(start, end, view_height)
+    }
     fn water_level(&self, origin: [f32; 3], view_height: f32) -> u8 {
         if crate::voxel::active_for(self.brushes) {
             crate::voxel::water_level(origin, view_height)

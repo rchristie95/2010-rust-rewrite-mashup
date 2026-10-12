@@ -23,6 +23,16 @@ pub fn swim_move<C: CollisionBackend>(
     if cmd.buttons & (buttons::CROUCH | buttons::PRONE) != 0 {
         wish[2] -= 1.0;
     }
+    // With no dive input the body is buoyant, rather than slowly sinking
+    // under reduced gravity forever. Explicit view-directed diving still wins.
+    if wish[2].abs() < 0.01 {
+        let buoyancy = if collision.water_level(ps.origin, ps.view_height_current) >= 2 {
+            24.0
+        } else {
+            0.0
+        };
+        ps.velocity[2] += (buoyancy - ps.velocity[2]) * (6.0 * pml.frametime).min(1.0);
+    }
     let length = libm::sqrtf(wish.iter().map(|v| v * v).sum());
     if length > 0.0 {
         for v in &mut wish {

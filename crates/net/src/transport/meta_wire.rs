@@ -707,7 +707,7 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
             let kind = input.get_u8()?;
             let position = [input.get_i32()?, input.get_i32()?, input.get_i32()?];
             let state = input.get_u16()?;
-            if kind > 2
+            if kind > 3
                 || i64::from(position[0]).abs() > 30_000_000
                 || i64::from(position[2]).abs() > 30_000_000
                 || !(-2_048..=2_048).contains(&position[1])

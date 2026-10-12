@@ -27,6 +27,7 @@ pub struct McStack {
 pub enum McSlot {
     Inventory(usize),
     Crafting(usize),
+    Workbench(usize),
     Result,
 }
 
@@ -65,6 +66,10 @@ pub struct MinecraftUi {
     pub selected: usize,
     pub slots: Vec<Option<McStack>>,
     pub crafting: [Option<McStack>; 4],
+    pub workbench: [Option<McStack>; 9],
+    pub workbench_open: bool,
+    /// Console/replay input follows the same use path as middle-click.
+    pub interaction_requested: bool,
     pub result: Option<McStack>,
     /// The stack on the cursor.
     pub cursor: Option<McStack>,
@@ -92,7 +97,7 @@ pub struct MinecraftUi {
     /// The selection is not a gun: the hand or a held item shows, and the
     /// gun neither fires nor aims.
     pub holding_item: bool,
-    /// The selected slot is empty: MW2's bare hands show, without the gun.
+    /// The selected slot is empty: the Minecraft right arm is shown.
     pub empty_hand: bool,
     /// How far through its swing the hand is, 0 to 1.
     pub hand_swing: f32,

@@ -58,9 +58,16 @@ impl InventoryUi {
     /// a gun the player no longer has leaves.
     pub(crate) fn sync_weapons(&mut self, inventory: &mut Inventory, owned: &[u32]) {
         let keep = |stack: &Option<ItemStack>| {
-            stack.as_ref().is_none_or(|s| weapon_of(s).is_none_or(|w| owned.contains(&w)))
+            stack
+                .as_ref()
+                .is_none_or(|s| weapon_of(s).is_none_or(|w| owned.contains(&w)))
         };
-        for slot in inventory.slots.iter_mut().chain(inventory.crafting.iter_mut()) {
+        for slot in inventory
+            .slots
+            .iter_mut()
+            .chain(inventory.crafting.iter_mut())
+            .chain(inventory.workbench.iter_mut())
+        {
             if !keep(slot) {
                 *slot = None;
             }
@@ -72,6 +79,7 @@ impl InventoryUi {
             .slots
             .iter()
             .chain(inventory.crafting.iter())
+            .chain(inventory.workbench.iter())
             .chain(std::iter::once(&inventory.cursor))
             .filter_map(|s| s.as_ref().and_then(weapon_of))
             .collect();
@@ -100,16 +108,39 @@ impl InventoryUi {
         let mut thrown = Vec::new();
         for click in std::mem::take(&mut ui.clicks) {
             match click {
-                McClick::Slot { slot: McSlot::Inventory(index), right, shift } => {
+                McClick::Slot {
+                    slot: McSlot::Workbench(index),
+                    right,
+                    shift,
+                } => {
+                    inventory.click_workbench_slot(index, right, shift);
+                }
+                McClick::Slot {
+                    slot: McSlot::Inventory(index),
+                    right,
+                    shift,
+                } => {
                     if let Some(stack) = inventory.click(Some(index), right, shift) {
                         thrown.push(stack);
                     }
                 }
-                McClick::Slot { slot: McSlot::Crafting(index), right, shift } => {
+                McClick::Slot {
+                    slot: McSlot::Crafting(index),
+                    right,
+                    shift,
+                } => {
                     inventory.click_crafting_slot(index, right, shift);
                 }
-                McClick::Slot { slot: McSlot::Result, shift, .. } => {
-                    inventory.take_crafting_output(shift);
+                McClick::Slot {
+                    slot: McSlot::Result,
+                    shift,
+                    ..
+                } => {
+                    if ui.workbench_open {
+                        inventory.take_workbench_output(shift);
+                    } else {
+                        inventory.take_crafting_output(shift);
+                    }
                 }
                 McClick::Outside { right } => {
                     if let Some(stack) = inventory.click(None, right, false) {
@@ -117,11 +148,16 @@ impl InventoryUi {
                     }
                 }
                 McClick::Gather { right } => inventory.pickup_all(right),
-                McClick::Swap { slot: McSlot::Inventory(index), hotbar } => inventory.number_swap(index, hotbar),
+                McClick::Swap {
+                    slot: McSlot::Inventory(index),
+                    hotbar,
+                } => inventory.number_swap(index, hotbar),
                 McClick::Swap { .. } => {}
                 McClick::Spread { slots, right } => inventory.distribute(&slots, right),
                 McClick::Close => {
                     thrown.extend(inventory.settle_crafting());
+                    thrown.extend(inventory.settle_workbench());
+                    ui.workbench_open = false;
                     if let Some(rest) = inventory.settle_cursor() {
                         thrown.push(rest);
                     }
@@ -168,6 +204,7 @@ impl InventoryUi {
                 .slots
                 .iter()
                 .chain(inventory.crafting.iter())
+                .chain(inventory.workbench.iter())
                 .chain(std::iter::once(&inventory.cursor))
                 .any(|stack| stack.as_ref().and_then(weapon_of) == Some(held));
         self.last_held = Some(held);
@@ -201,9 +238,9 @@ impl InventoryUi {
         packs: &PackStack,
         images: &mut Assets<Image>,
     ) {
-        let language = self
-            .language
-            .get_or_insert_with(|| minecraft_terrain::item_icons::language(packs).unwrap_or_default());
+        let language = self.language.get_or_insert_with(|| {
+            minecraft_terrain::item_icons::language(packs).unwrap_or_default()
+        });
         let mut stacks = Vec::new();
         let mut convert = |stack: &Option<ItemStack>| {
             stack.as_ref().map(|s| {
@@ -216,9 +253,19 @@ impl InventoryUi {
                 }
             })
         };
-        ui.slots = inventory.slots.iter().take(frame::minecraft_ui::MC_INVENTORY_SLOTS).map(&mut convert).collect();
+        ui.slots = inventory
+            .slots
+            .iter()
+            .take(frame::minecraft_ui::MC_INVENTORY_SLOTS)
+            .map(&mut convert)
+            .collect();
         ui.crafting = std::array::from_fn(|i| convert(&inventory.crafting[i]));
-        ui.result = convert(&inventory.crafting_output());
+        ui.workbench = std::array::from_fn(|i| convert(&inventory.workbench[i]));
+        ui.result = convert(&if ui.workbench_open {
+            inventory.workbench_output()
+        } else {
+            inventory.crafting_output()
+        });
         ui.cursor = convert(&inventory.cursor);
         if ui.selected != selected {
             let name = inventory.slots[selected]
@@ -233,7 +280,10 @@ impl InventoryUi {
                 continue;
             }
             if !ui.names.contains_key(&id) {
-                ui.names.insert(id.clone(), minecraft_terrain::item_icons::item_name(language, &id));
+                ui.names.insert(
+                    id.clone(),
+                    minecraft_terrain::item_icons::item_name(language, &id),
+                );
             }
             if self.cells.contains_key(&id) || self.failed.contains(&id) {
                 continue;
@@ -244,14 +294,29 @@ impl InventoryUi {
             }
             match minecraft_terrain::item_icons::item_icon(packs, &id, ICON as usize) {
                 Ok(Some(icon)) => {
-                    let atlas = self.atlas.get_or_insert_with(|| image::RgbaImage::new(ATLAS, ATLAS));
-                    let (x, y) = ((cell % (ATLAS / ICON)) * ICON, (cell / (ATLAS / ICON)) * ICON);
-                    let icon = image::imageops::resize(&icon, ICON, ICON, image::imageops::FilterType::Nearest);
+                    let atlas = self
+                        .atlas
+                        .get_or_insert_with(|| image::RgbaImage::new(ATLAS, ATLAS));
+                    let (x, y) = (
+                        (cell % (ATLAS / ICON)) * ICON,
+                        (cell / (ATLAS / ICON)) * ICON,
+                    );
+                    let icon = image::imageops::resize(
+                        &icon,
+                        ICON,
+                        ICON,
+                        image::imageops::FilterType::Nearest,
+                    );
                     image::imageops::replace(atlas, &icon, i64::from(x), i64::from(y));
                     let size = ATLAS as f32;
                     ui.icon_rects.insert(
                         id.clone(),
-                        [x as f32 / size, y as f32 / size, (x + ICON) as f32 / size, (y + ICON) as f32 / size],
+                        [
+                            x as f32 / size,
+                            y as f32 / size,
+                            (x + ICON) as f32 / size,
+                            (y + ICON) as f32 / size,
+                        ],
                     );
                     self.cells.insert(id, cell);
                     self.dirty = true;
@@ -273,7 +338,11 @@ impl InventoryUi {
             let image = Image {
                 sampler: ImageSampler::nearest(),
                 ..Image::new(
-                    Extent3d { width: ATLAS, height: ATLAS, depth_or_array_layers: 1 },
+                    Extent3d {
+                        width: ATLAS,
+                        height: ATLAS,
+                        depth_or_array_layers: 1,
+                    },
                     TextureDimension::D2,
                     atlas.as_raw().clone(),
                     TextureFormat::Rgba8UnormSrgb,
@@ -292,8 +361,61 @@ impl InventoryUi {
 }
 
 /// Throws stacks from the player's eye, as `Player.drop` does.
-pub(crate) fn throw(items: &mut minecraftoss_player::items::WorldItems, stacks: Vec<ItemStack>, thrower: &Thrower) {
+pub(crate) fn throw(
+    items: &mut minecraftoss_player::items::WorldItems,
+    stacks: Vec<ItemStack>,
+    thrower: &Thrower,
+) {
     for stack in stacks {
         items.toss(stack, thrower.eye, thrower.yaw, thrower.pitch);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn middle_click_workbench_uses_all_nine_slots_and_returns_inputs_on_close() {
+        let mut controller = InventoryUi::default();
+        let mut inventory = Inventory::default();
+        let mut ui = MinecraftUi {
+            workbench_open: true,
+            inventory_open: true,
+            ..Default::default()
+        };
+        inventory.cursor = Some(ItemStack::new("minecraft:oak_planks", 3));
+        ui.clicks.push(McClick::Slot {
+            slot: McSlot::Workbench(8),
+            right: false,
+            shift: false,
+        });
+        let mut selected = 0;
+        assert!(
+            controller
+                .apply_input(&mut ui, &mut inventory, &mut selected)
+                .is_empty()
+        );
+        assert_eq!(inventory.workbench[8].as_ref().unwrap().count, 3);
+        assert!(inventory.crafting.iter().all(Option::is_none));
+        ui.clicks.push(McClick::Close);
+        assert!(
+            controller
+                .apply_input(&mut ui, &mut inventory, &mut selected)
+                .is_empty()
+        );
+        assert!(inventory.workbench.iter().all(Option::is_none));
+        assert!(!ui.workbench_open);
+        assert_eq!(
+            inventory
+                .slots
+                .iter()
+                .flatten()
+                .map(|stack| u32::from(stack.count))
+                .sum::<u32>(),
+            3
+        );
+        inventory.workbench[8] = Some(weapon_item(77));
+        controller.sync_weapons(&mut inventory, &[77]);
+        assert!(!inventory.slots.iter().flatten().any(|stack| weapon_of(stack) == Some(77)), "a gun placed on the table was duplicated");
     }
 }

@@ -59,12 +59,22 @@ configuration directory described in the [run guide](docs/RUN.md).
 | | Y | Swap between the first two hotbar slots |
 | I | | Open or close the inventory |
 | E | | Interact or pick up a care package |
+| Middle click (Mouse 3) | | Use a Minecraft block or open a crafting table |
 | Q | | Drop the selected item |
 | Left click (block or empty hand) | Right trigger | Mine or punch |
 | Right click (holding a block) | Left trigger | Place the block |
 | Num Lock on the separate numpad | Click both sticks in | Skate 3 mode |
 
 More about skating in [docs/SKATE.md](docs/SKATE.md).
+
+Minecraft spawns rotate across separate exposed terrain positions and reject
+caves, water and lava. The starting inventory includes a diamond pickaxe in
+hotbar slot 9. An empty slot shows Minecraft's right arm. Crafting tables open
+a 3×3 grid on middle-click; I or Escape closes it and returns its ingredients.
+Entering water gets the skater off the board and switches to swimming: hold
+Space to rise or crouch to dive. Water slows falls and an idle swimmer floats.
+Lava contact deals 20 health damage every half second. Both multiplayer PCs
+must use the same build (protocol 113).
 
 ### Keyboard skating (Windows)
 

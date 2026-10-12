@@ -9,7 +9,16 @@ pub(crate) const SWING_TICKS: f32 = 6.0;
 
 /// The item's view-space pose (`applyItemArmTransform` then its display).
 pub(crate) fn item_pose(display: Mat4, swing: f32, inverse_height: f32) -> Mat4 {
-    Mat4::from_translation(Vec3::new(0.56, -0.52 - 0.6 * inverse_height, -0.72)) * item_swing_transform(swing) * display
+    Mat4::from_translation(Vec3::new(0.56, -0.52 - 0.6 * inverse_height, -0.72))
+        * item_swing_transform(swing)
+        * display
+}
+
+pub(crate) fn arm_pose(swing: f32) -> Mat4 {
+    Mat4::from_translation(Vec3::new(0.42, -0.24, -0.25))
+        * item_swing_transform(swing)
+        * Mat4::from_rotation_y((-15.0f32).to_radians())
+        * Mat4::from_rotation_x(75.0f32.to_radians())
 }
 
 fn item_swing_transform(swing: f32) -> Mat4 {

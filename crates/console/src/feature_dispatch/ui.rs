@@ -24,6 +24,7 @@ pub(crate) fn route_ui_commands(
         Option<Res<PresentedSnapshot>>,
     ),
     mut menu_requests: MessageWriter<frame::UiMenuRequest>,
+    mut minecraft: ResMut<frame::MinecraftUi>,
 ) {
     let (console, settings, line) = &mut output;
     let capacity = settings.log_capacity;
@@ -35,6 +36,58 @@ pub(crate) fn route_ui_commands(
 
     for cmd in events.read() {
         match cmd.name.as_str() {
+            "minecraft" => {
+                if !minecraft.active {
+                    echo(
+                        "minecraft: no active Minecraft player".into(),
+                        console,
+                        line,
+                    );
+                    continue;
+                }
+                match cmd.args.first().map(String::as_str).unwrap_or("status") {
+                    "slot" => {
+                        if let Some(slot) = cmd
+                            .args
+                            .get(1)
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .filter(|slot| (1..=9).contains(slot))
+                        {
+                            minecraft.select = Some(slot - 1);
+                        } else {
+                            echo("usage: minecraft slot <1..9>".into(), console, line);
+                        }
+                    }
+                    "use" => minecraft.interaction_requested = true,
+                    "inventory" => {
+                        minecraft.inventory_open = !minecraft.inventory_open;
+                        if !minecraft.inventory_open {
+                            minecraft.clicks.push(frame::McClick::Close);
+                        }
+                    }
+                    "status" => echo(
+                        format!(
+                            "minecraft: slot={} hand={} workbench={} inventory={} items={:?}",
+                            minecraft.selected + 1,
+                            minecraft.empty_hand,
+                            minecraft.workbench_open,
+                            minecraft.inventory_open,
+                            minecraft
+                                .slots
+                                .iter()
+                                .map(|slot| slot.as_ref().map(|stack| stack.id.as_str()))
+                                .collect::<Vec<_>>()
+                        ),
+                        console,
+                        line,
+                    ),
+                    _ => echo(
+                        "usage: minecraft status | slot <1..9> | use | inventory".into(),
+                        console,
+                        line,
+                    ),
+                }
+            }
             "ui" => match cmd.args.as_slice() {
                 [] => echo(
                     format!("ui = {}", if ui_draw.0 { 1 } else { 0 }),

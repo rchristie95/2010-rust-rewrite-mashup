@@ -9,6 +9,12 @@ pub trait CollisionBackend {
         0
     }
 
+    /// First fluid contact along a fast fall, so a shallow pool cannot be
+    /// crossed entirely between movement commands.
+    fn water_entry(&self, _start: [f32; 3], _end: [f32; 3], _view_height: f32) -> Option<[f32; 3]> {
+        None
+    }
+
     fn trace(&self, input: GroundTraceInput) -> Trace;
 
     fn correct_solid(

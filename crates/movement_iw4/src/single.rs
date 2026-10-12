@@ -172,15 +172,27 @@ pub fn pmove<C: CollisionBackend, L: MantleXAnimLength, R: MantleRootDelta>(
         };
     }
 
-    let water_level = collision.water_level(ps.origin, ps.view_height_current);
+    let mut water_level = collision.water_level(ps.origin, ps.view_height_current);
+    if water_level == 0 && ps.velocity[2] < -120.0 {
+        let end = core::array::from_fn(|i| ps.origin[i] + ps.velocity[i] * pml.frametime);
+        if let Some(entry) = collision.water_entry(ps.origin, end, ps.view_height_current) {
+            let clear = collision.trace(GroundTraceInput {
+                start: ps.origin,
+                end: entry,
+                mins: bounds.mins,
+                maxs: bounds.maxs,
+                tracemask: bounds.tracemask,
+            });
+            if clear.fraction >= 1.0 && clear.startsolid == 0 {
+                ps.origin = entry;
+                ps.ground_entity_num = ENTITYNUM_NONE;
+                water_level = collision.water_level(ps.origin, ps.view_height_current);
+            }
+        }
+    }
     // Keep rising through the last few inches at the surface. Shallow-water
     // jumps from the ground still use the normal jump impulse.
-    if water_level >= 2
-        || (water_level == 1
-            && cmd.buttons & playerstate_iw4::buttons::JUMP != 0
-            && ps.ground_entity_num == ENTITYNUM_NONE
-            && ps.pm_flags & pm_flags::JUMPING == 0)
-    {
+    if water_level >= 2 || (water_level == 1 && ps.ground_entity_num == ENTITYNUM_NONE) {
         ps.pm_flags &=
             !(pm_flags::LADDER | pm_flags::MANTLE | pm_flags::SPRINTING | pm_flags::JUMPING);
         ps.ground_entity_num = ENTITYNUM_NONE;
